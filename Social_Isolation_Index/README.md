@@ -1,49 +1,9 @@
-# 📘 Social Isolation Index (MCA-Based)
+#  Social Isolation Index (MCA-Based)
 
-This folder contains the construction of the **Social Isolation Index**, derived using *Multiple Correspondence Analysis (MCA)* to summarize the underlying structure of categorical indicators related to social isolation and adverse interpersonal experiences.
+A social isolation was derived using Multiple Correspondence Analysis (MCA), a multivariate technique suited for summarizing the latent structure of categorical data. Five items assessing dimensions of social isolation and adverse interpersonal experiences were included in the analysis: frequency of feeling silenced or excluded (uls_2), frequency of feeling completely alone (uls_3), exposure to mobility restriction by others (msoc_forb), experiences of humiliation (msoc_humi), and deprivation of basic needs despite the availability of resources (msoc_prov). The full list of variables and their response categories is provided in Table S1.
+MCA decomposed the joint variability of these indicators into orthogonal dimensions. The first dimension (Dim 1) captured the dominant underlying pattern of association across items, explaining 38.5% of the total inertia (Table S2). Coordinates of individual response categories on Dim 1 and Dim 2 indicated that the highest positive loadings corresponded to categories reflecting greater social isolation and interpersonal adversity, whereas negative loadings represented lower exposure (Table S3). All five variables showed strong contributions to Dim 1 (η² = 1.00 for each variable), confirming that this first axis effectively summarized the shared structure across indicators (Table S4).
+Individual MCA scores on Dim 1 were extracted and used as the composite index of social isolation. Higher scores reflect a profile characterized by clustering in categories associated with greater isolation. To facilitate comparability across models, the index was also standardized (mean = 0, SD = 1). Descriptive statistics of the raw and standardized scores are reported in Table S5.
+This index was subsequently used as a continuous predictor in the main analyses to quantify the degree of social isolation by participants.<img width="1406" height="377" alt="image" src="https://github.com/user-attachments/assets/e30d0305-aa13-4cbd-993e-3296791e1cf2" />
 
-## 🧩 Variables Included
-Five nominal variables were evaluated:
-
-- Frequency of feeling silenced or excluded (`uls_2`)
-- Frequency of feeling completely alone (`uls_3`)
-- Exposure to mobility restriction by others (`msoc_forb`)
-- Experiences of humiliation (`msoc_humi`)
-- Deprivation of basic needs despite available resources (`msoc_prov`)
-
-All variables and categories are listed in **Supplementary Table S1**.
-
----
-
-##  MCA Procedure
-MCA decomposed the joint variability of the indicators into orthogonal dimensions:
-
-- **Dimension 1 (Dim 1)** captured the dominant structure, explaining **38.5%** of the inertia (Table S2).
-- **Category coordinates** on Dim 1 and Dim 2 showed that:
-  - Higher positive loadings corresponded to **greater social isolation and interpersonal adversity**
-  - Negative loadings indicated **lower exposure** (Table S3)
-
-All five variables contributed strongly to Dim 1 (η² = 1.00), confirming that this axis effectively summarizes the shared structure (Table S4).
-
----
-
-##  Index Score
-Individual MCA scores on **Dim 1** were extracted and used as the **composite Social Isolation Index**.
-
-- Higher scores = profile characterized by **greater isolation**
-- Scores were **standardized (mean = 0, SD = 1)** for comparability across models
-- Descriptive statistics are reported in **Supplementary Table S5**
-
-This standardized Dim 1 score was included as a continuous predictor in the main statistical analyses.
-
----
-
-##  Files in This Folder
-- `MCA_social_isolation_index.xlsx` → Input variables and categories  
-- `R_code_Social_Isolation_Index.R` → R script for MCA and index extraction  
-- `README.md` → Documentation for index construction  
-
----
-
-📌 *For replication or further methodological details, refer to the corresponding tables in the Supplementary Material.*
+*For replication or further methodological details, refer to the corresponding tables in the Supplementary Material.*
 
