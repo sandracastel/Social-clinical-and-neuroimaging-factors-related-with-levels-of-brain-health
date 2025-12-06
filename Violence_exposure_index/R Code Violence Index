@@ -1,0 +1,188 @@
+# ============================
+# Violencia MCA Index
+# ============================
+
+# 1. Instalar paquetes (solo la primera vez)
+# install.packages("haven")
+# install.packages("FactoMineR")
+# install.packages("factoextra")
+# install.packages("dplyr")
+# install.packages("readr")
+# install.packages("readxl")
+# install.packages("tidyr")
+# install.packages("ggplot2")
+
+# 2. Cargar paquetes
+library(haven)
+library(FactoMineR)
+library(factoextra)
+library(dplyr)
+library(readr)
+library(readxl)
+library(tidyr)
+library(ggplot2)
+
+
+# 3. Cargar la base (ajusta la ruta si es necesario)
+data <- read_excel("C:/Escritorio/Proyecto_Doctorado/Organización de variables/MCA_indice_socioeconomico_violencia.xlsx")
+
+# 4. Seleccionar las variables del MCA (ÍNDICE DE viole cia)
+vars_mca <- c("msoc_45rev_0", "msoc_45rev_3", "msoc_45rev_4", "msoc_45rev_5", "msoc_45rev_6", "msoc_45rev_7", "msoc_45rev_8","msoc_forb", "msoc_prov", "msoc_mon", "msoc_prop", "msoc_deman")
+mca_data <- data %>%
+  select(all_of(vars_mca))
+
+# 5. Asegurar que todas son factores (categóricas)
+mca_data <- mca_data %>%
+  mutate(across(everything(), ~ as_factor(.)))  # usa etiquetas si existen
+
+# 6. Ejecutar el MCA (sin gráficas por ahora)
+res_mca <- MCA(mca_data, graph = FALSE)
+
+# 7. Extraer la Dimensión 1 para cada individuo (índice violencia)
+violencia_dim1 <- res_mca$ind$coord[, 1]
+
+# Añadir el índice a la base original
+data$violencia_mca_dim1   <- violencia_dim1
+
+# Estandarizar la Dimensión 1 (media 0, DE 1)
+data$violencia_mca_dim1_z <- as.numeric(scale(data$violencia_mca_dim1))
+
+# 8. Guardar la base con el índice en CSV
+write_csv(data, "MCA_indice_violencia_con_MCA.csv")
+
+# 9. (Opcional) Resumen rápido del MCA
+summary(res_mca)
+
+# 10. (Opcional) Biplot de categorías e individuos
+fviz_mca_biplot(res_mca, repel = TRUE)
+
+# ============================
+# TABLA S1 – Variables y categorías incluidas
+# ============================
+tabla_S1 <- mca_data %>%
+  pivot_longer(cols = everything(),
+               names_to = "Variable",
+               values_to = "Categoria") %>%
+  count(Variable, Categoria, name = "n") %>%
+  group_by(Variable) %>%
+  mutate(Prop = n / sum(n)) %>%
+  ungroup()
+
+write_csv(tabla_S1, "S1_violencia_variables_categorias.csv")
+res_mca$var$coord
+# ============================
+# TABLA S2 – Eigenvalues y varianza explicada
+# ============================
+eig <- as.data.frame(res_mca$eig)
+eig$Dimension <- paste0("Dim ", seq_len(nrow(eig)))
+
+tabla_S2 <- eig %>%
+  transmute(
+    Dimension,
+    Eigenvalue          = eigenvalue,
+    Variance_explained  = `percentage of variance`,
+    Cumulative_variance = `cumulative percentage of variance`
+  )
+
+# Ver en consola
+tabla_S2
+
+# Guardar en CSV
+write_csv(tabla_S2, "S2_violencia_eigenvalues_varianza.csv")
+
+# ============================
+# TABLA S3 – Coordenadas de categorías (Dim1 y Dim2)
+# ============================
+# Extraer todas las coordenadas de las variables
+coords <- as.data.frame(res_mca$var$coord)
+
+# Añadir columna con el nombre de la categoría
+coords$Category <- rownames(coords)
+
+# Construir la tabla S3 usando los nombres reales de columnas: "Dim 1" y "Dim 2"
+tabla_S3 <- coords %>%
+  transmute(
+    Category,
+    Dim1 = `Dim 1`,
+    Dim2 = `Dim 2`
+  )
+
+# Ver en consola
+tabla_S3
+
+# Guardar en CSV
+write_csv(tabla_S3, "S3_violencia_coordenadas_categorias.csv")
+# ============================
+# TABLA S4 – Contribución de cada variable (eta²)
+# ============================
+eta2 <- as.data.frame(res_mca$var$eta2)
+eta2$Variable <- rownames(eta2)
+
+tabla_S4 <- eta2 %>%
+  transmute(
+    Variable,
+    Dim1_eta2 = `Dim 1`,
+    Dim2_eta2 = `Dim 2`,
+    Dim3_eta2 = `Dim 3`
+  )
+
+# Ver en consola
+tabla_S4
+
+# Guardar a CSV
+write_csv(tabla_S4, "S4_violencia_contribucion_eta2.csv")
+
+# ============================
+# TABLA S5 – Estadísticos descriptivos del índice (Dim1)
+# ============================
+index <- data$violencia_mca_dim1   # índice violencia
+
+# Estadísticos básicos y ampliados
+summary(index)
+
+mean_val   <- mean(index, na.rm = TRUE)
+sd_val     <- sd(index, na.rm = TRUE)
+median_val <- median(index, na.rm = TRUE)
+iqr_val    <- IQR(index, na.rm = TRUE)
+range_val  <- range(index, na.rm = TRUE)
+
+percentiles <- quantile(index,
+                        probs = c(0.01, 0.05, 0.10, 0.90, 0.95, 0.99),
+                        na.rm = TRUE)
+
+tabla_S5 <- data.frame(
+  Statistic = c("Mean", "SD", "Median", "Min", "Max",
+                "Q1 (25%)", "Q3 (75%)", "IQR",
+                "P1", "P5", "P10", "P90", "P95", "P99"),
+  Value = c(
+    mean_val,
+    sd_val,
+    median_val,
+    range_val[1],     # Min
+    range_val[2],     # Max
+    quantile(index, 0.25, na.rm = TRUE),  # Q1
+    quantile(index, 0.75, na.rm = TRUE),  # Q3
+    iqr_val,
+    percentiles[1],   # P1
+    percentiles[2],   # P5
+    percentiles[3],   # P10
+    percentiles[4],   # P90
+    percentiles[5],   # P95
+    percentiles[6]    # P99
+  )
+)
+
+tabla_S5
+write_csv(tabla_S5, "S5_violencia_descriptivos_indice.csv")
+
+# ============================
+# Figura opcional – Densidad del índice economico
+# ============================
+ggplot(data, aes(x = violencia_mca_dim1)) +
+  geom_density(fill = "lightblue", alpha = 0.5) +
+  theme_minimal() +
+  labs(
+    title = "Distribution of the MCA-derived violencia index (Dim 1)",
+    x = "MCA Dimension 1 score (violencia)",
+    y = "Density"
+  )
