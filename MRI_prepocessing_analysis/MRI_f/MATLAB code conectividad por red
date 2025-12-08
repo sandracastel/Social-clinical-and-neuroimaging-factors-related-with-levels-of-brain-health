@@ -1,0 +1,122 @@
+%% Ruta con los archivos .mat
+input_folder = 'D:\BOLD\TS'; % <-- 'D:\BOLD\Resumen_TS_CONN (version 2).xlsx'
+files = dir(fullfile(input_folder, '*.mat'));
+
+%% Cargar archivo Excel con grupos
+group_tbl = readtable('D:\BOLD\Resumen_TS_CONN (version 2).xlsx');
+
+% Validar columnas
+if ~all(ismember({'ID','Grupo'}, group_tbl.Properties.VariableNames))
+    error('El archivo Excel debe contener las columnas "ID" y "Grupo".');
+end
+
+% Convertir ID y Grupo a string para evitar problemas de concatenación
+group_tbl.ID = string(group_tbl.ID);
+group_tbl.Grupo = string(group_tbl.Grupo);
+
+%% Asignación ROI → Red funcional (basado en AAL116)
+networks = {'Somatomotor','FPC','DMN','Limbic','Visual','SN','DAN','Subcortical'};
+roi_map = containers.Map('KeyType','double','ValueType','char');
+
+% DMN
+dmn = [31:36, 39:44];
+for i = dmn, roi_map(i) = 'DMN'; end
+
+% DAN
+dan = [59 60 61 62 67 68];
+for i = dan, roi_map(i) = 'DAN'; end
+
+% SN
+sn = [73 74 75 76 81 82];
+for i = sn, roi_map(i) = 'SN'; end
+
+% FPC
+fpc = [1 2 3 4 5 6 7 8];
+for i = fpc, roi_map(i) = 'FPC'; end
+
+% Visual
+visual = [43:50 51 52];
+for i = visual, roi_map(i) = 'Visual'; end
+
+% Somatomotor
+somato = [17 18 19 20 69 70];
+for i = somato, roi_map(i) = 'Somatomotor'; end
+
+% Limbic
+limbic = [37 38 41 42 83 84 85 86];
+for i = limbic, roi_map(i) = 'Limbic'; end
+
+% Subcortical
+subcort = 91:116;
+for i = subcort, roi_map(i) = 'Subcortical'; end    
+
+%% 🧾 Inicializar tabla de resultados
+results = table();
+
+%% Procesar todos los sujetos
+for i = 1:length(files)
+    filename = files(i).name;
+    subj_id = extractBetween(filename, 'sub-', '_timeseries'); 
+    subj_id = string(subj_id{1});
+    filepath = fullfile(input_folder, filename);
+    data = load(filepath);
+
+    if isfield(data, 'ts')
+        ts = data.ts;
+        [r, c] = size(ts);
+
+        %  Normalizar tamaño a 120x116
+        if r < 120, ts(end+1:120,:) = 0; end
+        if r > 120, ts = ts(1:120,:); end
+        if c < 116, ts(:,end+1:116) = 0; end
+        if c > 116, ts = ts(:,1:116); end
+
+        %  Correlación y transformación Z de Fisher
+        R = corr(ts');
+        Z = atanh(R);  % Fisher Z transform
+
+        %  Preparar asignación de ROIs a redes
+        roi_names = cell(1, 120);
+        for r = 1:120
+            if isKey(roi_map, r)
+                roi_names{r} = roi_map(r);
+            else
+                roi_names{r} = '';  % sin red asignada
+            end
+        end
+
+        % Agrupar por red funcional
+        net_vals = zeros(1, numel(networks));
+        for k = 1:numel(networks)
+            red = networks{k};
+            roi_idx = find(strcmp(roi_names, red));
+            if isempty(roi_idx)
+                net_vals(k) = NaN;
+            else
+                submat = Z(roi_idx, roi_idx);
+                submat = submat(~eye(length(roi_idx)));  % eliminar la diagonal
+                net_vals(k) = mean(submat, 'omitnan');
+            end
+        end
+
+        %  Buscar grupo en Excel
+        idx = find(group_tbl.ID == subj_id);
+        if ~isempty(idx)
+            grupo = group_tbl.Grupo(idx);
+        else
+            grupo = "NA";
+        end
+
+        %  Agregar sujeto a tabla
+        T = table(subj_id, grupo, net_vals(1), net_vals(2), net_vals(3), ...
+                  net_vals(4), net_vals(5), net_vals(6), net_vals(7), net_vals(8), ...
+                  'VariableNames', {'ID','Grupo','Somatomotor','FPC','DMN','Limbic','Visual','SN','DAN','Subcortical'});
+        results = [results; T];
+    end
+end
+
+%%  Guardar resultados en Excel
+output_file = fullfile(input_folder, 'conectividad_promedio_redes.xlsx');
+writetable(results, output_file);
+disp([' Archivo guardado en: ' 'D:\BOLD\CONN\results');
+
