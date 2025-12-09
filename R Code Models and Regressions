@@ -1,0 +1,3591 @@
+#*******************************************************************************
+  #### 0.1. LIBRARIES ####
+#*******************************************************************************
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(MASS)      
+library(broom)    
+library(yardstick) 
+library(pscl)     
+library(ggplot2)
+library(purrr)
+library(tibble)
+library(ggseg)
+library(forcats)
+library(nnet)
+library(stringr)
+
+
+
+
+#*******************************************************************************
+#### 1. INPUT ####
+#*******************************************************************************
+
+data_social = read_excel("C:/Escritorio/Neurociencias/Factores asociados a Niveles de SC/Brain-Health-Thesis/Brain-Health-Thesis/data/raw/MODELO_1_LIMPIO.xlsx")
+data_volume = read_excel("C:/Escritorio/Neurociencias/Factores asociados a Niveles de SC/Brain-Health-Thesis/Brain-Health-Thesis/data/raw/Volumenes estructurales por grupos de SC.xlsx")
+data_network = read_excel("C:/Escritorio/Neurociencias/Factores asociados a Niveles de SC/Brain-Health-Thesis/Brain-Health-Thesis/data/raw/Conectividad_redes_sujetos.xlsx")
+dictionary = read_excel("C:/Escritorio/Neurociencias/Factores asociados a Niveles de SC/Brain-Health-Thesis/Brain-Health-Thesis/data/raw/diccionario socio economico.xlsx")
+
+#*******************************************************************************
+#### 2. DEPURATION ####
+#*******************************************************************************
+
+# Ensure record_id is in uppercase and merge all social/volume/network data 
+colnames(data_network)[1] <- "record_id"  # rename first column in data_network
+
+data <- data_social %>%
+  # Standardize key
+  mutate(record_id = toupper(record_id)) %>%
+  # Merge selected columns from data_volume
+  left_join(
+    data_volume %>% dplyr::select(record_id, 6:124),
+    by = "record_id"
+  ) %>%
+  # Merge selected columns from data_network
+  left_join(
+    data_network %>% dplyr::select(record_id, 6:15),
+    by = "record_id"
+  )
+
+# Keep only 'data' and 'dictionary' in the environment 
+rm(list = setdiff(ls(), c("data", "dictionary")))
+
+# Harmonize the 'Type' column in dictionary
+dictionary <- dictionary %>%
+  mutate(
+    # Lowercase for easier pattern matching
+    Type = tolower(Type),
+    # Map to consistent English labels
+    Type = dplyr::case_when(
+      grepl("num",      Type) ~ "Numerical",
+      grepl("númerica", Type) ~ "Numerical",
+      grepl("ordinal",  Type) ~ "Categorical ordinal",
+      grepl("nominal",  Type) ~ "Categorical nominal",
+      TRUE                    ~ Type
+    ),
+    # Keep original variable name for auditing
+    Variable_original = Variable,
+    # Manual one-by-one fixes to match colnames(data)
+    Variable = dplyr::recode(
+      Variable,
+      "[msoc_20rev] work_nigth"            = "work_nigth",
+      "[msoc_bas_0]"                       = "msoc_bas",
+      "Education_livingston"               = "education_livingston",
+      "TEC_livingston"                     = "tec_livingston",
+      "Actividad_fisic__livingston"        = "actividad_fisic_livingston",
+      "Aislamiento_social_livingston"      = "aislamiento_social_livingston",
+      "Alcohol_livingston"                 = "alcohol_livingston",
+      "Livingston"                         = "livingston",
+      "Fragiles"                           = "fragiles",
+      "Prefragiles"                        = "prefragiles",
+      "Robustos"                           = "robustos",
+      "pais_nacim [demo_place]"            = "pais_nacim",
+      "pais_residen [demo_resid]"          = "pais_residen",
+      "education_year [demo_sp_education]" = "education_year"
+    )
+  )
+
+# Optional sanity checks (run interactively if needed) 
+setdiff(unique(dictionary$Variable), colnames(data))      # dictionary vars not in data
+setdiff(colnames(data), unique(dictionary$Variable))      # data vars not in dictionary
+
+# Mark specific rows as Binomial and one as Categorical ordinal 
+dictionary <- dictionary %>%
+  mutate(
+    Type = ifelse(
+      row_number() %in% c(5, 6, 9:12, 17:18, 23:24, 26:39),
+      "Binomial",
+      Type
+    )
+  )
+
+dictionary[16, "Type"] <- "Categorical ordinal"
+
+
+# Add the names of the variables in Dictionary
+dictionary <- dictionary %>%
+  dplyr::mutate(
+    Label_en = dplyr::recode(
+      Variable,
+      "uls_total"                          = "UCLA loneliness score",
+      "msoc_contact"                       = "Social contact frequency",
+      "social_index"                       = "Social support index",
+      "aislamiento_score"                  = "Social isolation index",
+      "work_nigth"                         = "History of night-shift work",
+      "msoc_bas"                           = "Difficulty meeting basic needs",
+      "msoc_fin"                           = "Current household finances",
+      "msoc_fin_rec"                       = "Household finances (12 months)",
+      "msoc_care"                          = "Difficulty paying medical care",
+      "msoc_91rev"                         = "Unmet medical care need",
+      "msoc_eat"                           = "Food insufficiency (eating less)",
+      "msoc_bal"                           = "Food insecurity (unbalanced diet)",
+      "msoc_ladder_35"                     = "Subjective social status ladder",
+      "indice_econosocial"                 = "Socioeconomic index",
+      "indice_econosocial_0_10"            = "Socioeconomic index (0–10)",
+      "categoria_econosocial"              = "Socioeconomic category",
+      "msoc_att"                           = "Physical assault with weapon",
+      "msoc_humi"                          = "Humiliation / emotional abuse",
+      "indice_violencia"                   = "Violence exposure index",
+      "z_violencia_score"                  = "Violence exposure z-score",
+      "violencia_score_0_10_r"             = "Violence exposure (0–10)",
+      "totalsocial_score"                  = "Total violence exposure score",
+      "education_livingston"               = "Education (Livingston)",
+      "audit_livingston"                   = "Hearing adequacy",
+      "visual_livingston"                  = "Vision adequacy",
+      "tec_livingston"                     = "History of head trauma",
+      "actividad_fisic_livingston"         = "Physical activity",
+      "hipertension_livingston"            = "Hypertension",
+      "diabetes_livingston"                = "Diabetes",
+      "obesidad_livingston"                = "Obesity",
+      "demo_smoke_livingston"              = "Smoking (yes/no)",
+      "aislamiento_social_livingston"      = "Social isolation (yes/no)",
+      "depression_livingston"              = "Depression",
+      "alcohol_livingston"                 = "Alcohol use",
+      "dislipidemia_colesterol_livingston" = "Hypercholesterolemia",
+      "livingston"                         = "Total Livingston score",
+      "fragiles"                           = "Frail",
+      "prefragiles"                        = "Pre-frail",
+      "robustos"                           = "Robust",
+      "gad_total"                          = "Anxiety score (GAD)",
+      "gds_total"                          = "Depression score (GDS)",
+      "pais_nacim"                         = "Country of birth",
+      "pais_residen"                       = "Country of residence",
+      "demo_sex"                           = "Sex assigned at birth",
+      "education_year"                     = "Years of education",
+      "demo_age"                           = "Age"
+    )
+  )
+
+
+
+# Recode and clean variables in 'data' 
+data <- data %>%
+  # Simple numeric replacement before categorical recoding
+  mutate(
+    # Set value 3 as missing in msoc_humi
+    msoc_humi = ifelse(msoc_humi == 3, NA, msoc_humi),
+    # In audit_livingston, recode 2 -> 1 (still numeric at this stage)
+    audit_livingston = ifelse(audit_livingston == 2, 1, audit_livingston)
+  ) %>%
+  # Categorical recoding using across()
+  mutate(
+    # 1/2 -> Yes/No in selected columns (by index)
+    across(c(13, 18, 19, 20, 25, 26),
+           ~ recode(., `1` = "Yes", `2` = "No")),
+    
+    # audit_livingston: 0/1 -> Yes/No
+    across(audit_livingston,
+           ~ recode(., `0` = "Yes", `1` = "No")),
+    
+    # Selected columns: 1/0 -> Yes/No
+    across(c(17, 34:43),
+           ~ recode(., `1` = "Yes", `0` = "No")),
+    
+    # Frailty-related variables
+    across(fragiles,
+           ~ recode(., `1` = ">3", `0` = "<3")),
+    across(prefragiles,
+           ~ recode(., `1` = "1-2", `0` = ">3")),
+    across(robustos,
+           ~ recode(., `1` = "0",  `0` = "1-3")),
+    
+    # Sex: 1/2 -> Female/Male
+    across(demo_sex,
+           ~ recode(., `1` = "Female", `2` = "Male")),
+    
+    # Social contact frequency
+    across(msoc_contact,
+           ~ recode(., `1` = "<1t/w",
+                    `2` = "1-2t/w",
+                    `3` = "3-5t/w",
+                    `4` = ">5t/w")),
+    
+    # Financial situation variables
+    across(c(msoc_fin, msoc_fin_rec),
+           ~ recode(., 
+                    `1` = "Had extra money to save",
+                    `2` = "Had enough to cover necessities",
+                    `3` = "Did not have enough to cover necessities")),
+    
+    # Visual status
+    across(visual_livingston,
+           ~ recode(.,
+                    `0` = "Yes",
+                    `1` = "No, but adequate with prescription glasses",
+                    `2` = "Cannot see")),
+    
+    # Education: years threshold
+    across(education_livingston,
+           ~ recode(.,
+                    `1` = ">8 years",
+                    `0` = "<8 years")),
+    
+    # Country of birth / residence
+    across(c(pais_nacim, pais_residen),
+           ~ recode(.,
+                    `1` = "Argentina",
+                    `2` = "Brasil",
+                    `3` = "Chile",
+                    `4` = "Colombia",
+                    `5` = "Mexico",
+                    `6` = "Peru",
+                    `7` = "Estados Unidos",
+                    `8` = "Otro")),
+    
+    across(msoc_bas,
+           ~ recode(., 
+                    `0` = "No",
+                    `1` = "Yes"
+           ))
+  )
+
+
+
+#*******************************************************************************
+#### 3. ORDINAL LOGISTIC REG. MODELS FOR BH CATEGORIES #####
+#*******************************************************************************
+
+# Create dataframes by type (from dictionary)
+# Subsets of dictionary by variable type (keep same structure as original)
+Numerical           <- dictionary[dictionary$Type == "Numerical",           "Column", drop = FALSE]
+Categorical.nominal <- dictionary[dictionary$Type == "Categorical nominal", "Column", drop = FALSE]
+Categorical.ordinal <- dictionary[dictionary$Type == "Categorical ordinal", "Column", drop = FALSE]
+Binomial            <- dictionary[dictionary$Type == "Binomial",            "Column", drop = FALSE]
+
+
+# Copy 'data' into 'df' so the original object remains intact
+df <- data
+
+# Ordered outcome variable: tipo_grupo_ord (from worst to best brain health)
+df$tipo_grupo_ord <- factor(
+  df$tipo_grupo,
+  levels  = c("BHD", "GBH", "OBH"),
+  ordered = TRUE
+)
+
+# Convenience function for ordered factors
+ord_factor <- function(x, lev) factor(x, levels = lev, ordered = TRUE)
+
+
+
+#*******************
+##### 3.1. Numerical and nominal variables ##### 
+#*******************
+
+# Numerical columns based on dictionary
+num_cols <- names(df)[Numerical$Column]
+
+# Remove 'categoria_econosocial' from numerical set (it will be treated as ordinal)
+num_cols <- setdiff(num_cols, "categoria_econosocial")
+
+# Convert numerical columns to numeric (handles character/factor)
+df[num_cols] <- lapply(df[num_cols], function(x) as.numeric(as.character(x)))
+
+# Categorical nominal variables (from dictionary)
+nom_cols <- names(df)[Categorical.nominal$Column]
+df[nom_cols] <- lapply(df[nom_cols], as.factor)
+
+# Ensure 'livingston' is numeric
+df$livingston <- as.numeric(as.character(df$livingston))
+
+
+
+#*******************
+##### 3.2. Ordinal categorical variables #####
+#*******************
+
+# Social contact frequency
+df$msoc_contact <- ord_factor(
+  df$msoc_contact,
+  c("<1t/w", "1-2t/w", "3-5t/w", ">5t/w")
+)
+
+# Financial situation (original and “recall” version)
+fin_levels <- c(
+  "Did not have enough to cover necessities",
+  "Had enough to cover necessities",
+  "Had extra money to save"
+)
+
+df$msoc_fin     <- ord_factor(df$msoc_fin,     fin_levels)
+df$msoc_fin_rec <- ord_factor(df$msoc_fin_rec, fin_levels)
+
+# Visual status
+df$visual_livingston <- ord_factor(
+  df$visual_livingston,
+  c(
+    "Cannot see",
+    "No, but adequate with prescription glasses",
+    "Yes"
+  )
+)
+
+# Socioeconomic category
+df$categoria_econosocial <- ord_factor(
+  df$categoria_econosocial,
+  c("Bajo", "Medio", "Alto")
+)
+
+
+#*******************
+##### 3.3. Binary variables (Yes/No and ordered binaries) #####
+#*******************
+
+# Binary variables coded as "No"/"Yes"
+bin_yes_no <- c(
+  "work_nigth",
+  "msoc_care",
+  "msoc_91rev",
+  "msoc_eat",
+  "msoc_bal",
+  "msoc_att",
+  "msoc_humi",
+  "audit_livingston",
+  "actividad_fisic_livingston",
+  "hipertension_livingston",
+  "diabetes_livingston",
+  "obesidad_livingston",
+  "demo_smoke_livingston",
+  "aislamiento_social_livingston",
+  "depression_livingston",
+  "alcohol_livingston",
+  "dislipidemia_colesterol_livingston",
+  "msoc_bas"
+)
+
+df[bin_yes_no] <- lapply(
+  df[bin_yes_no],
+  function(x) factor(x, levels = c("No", "Yes"))  # reference: "No"
+)
+
+# Education (years threshold)
+df$education_livingston <- ord_factor(
+  df$education_livingston,
+  c("<8 years", ">8 years")
+)
+
+# Frailty-related variables
+df$fragiles <- ord_factor(
+  df$fragiles,
+  c("<3", ">3")  # assuming >3 = worse frailty
+)
+
+df$prefragiles <- ord_factor(
+  df$prefragiles,
+  c("1-2", ">3")
+)
+
+df$robustos <- ord_factor(
+  df$robustos,
+  c("0", "1-3")  # assuming 0 = best status
+)
+
+# Variable with only "No": remove because it has no variability and may break the model
+df$tec_livingston <- NULL
+
+
+
+#*******************
+##### 3.4. Predictor selection and model fitting ##### 
+#*******************
+
+# Candidate predictors: columns 4 to 48
+all_preds <- names(df)[4:48]
+
+# Keep only predictors with more than one unique (non-missing) value
+preds_final <- all_preds[
+  sapply(df[all_preds], function(x) length(unique(na.omit(x))) > 1)
+]
+
+# Build formula tipo_grupo_ord ~ all predictors with variability
+form_str  <- paste("tipo_grupo_ord ~", paste(preds_final, collapse = " + "))
+form_full <- as.formula(form_str)
+
+set.seed(123)  # for reproducibility of internal procedures
+
+fit_ord <- polr(
+  formula   = form_full,
+  data      = df,
+  method    = "logistic",
+  Hess      = TRUE,     # needed for standard errors and CIs
+  na.action = na.omit   # complete-case analysis
+)
+
+
+#*******************
+##### 3.5. Coefficients, ORs and confidence intervals ####
+#*******************
+
+# Coefficients and variance-covariance matrix
+coefs    <- coef(summary(fit_ord))
+vcov_mat <- vcov(fit_ord)  # kept for completeness if needed later
+
+# Build coefficient table
+results_coef <- data.frame(
+  term      = rownames(coefs),
+  estimate  = coefs[, "Value"],
+  std.error = coefs[, "Std. Error"],
+  z         = coefs[, "t value"],
+  row.names = NULL
+) %>%
+  # Wald p-values
+  dplyr::mutate(
+    p_value  = 2 * pnorm(abs(z), lower.tail = FALSE),
+    # Odds ratios and 95% CIs
+    OR       = exp(estimate),
+    OR_low95 = exp(estimate - 1.96 * std.error),
+    OR_high95= exp(estimate + 1.96 * std.error)
+  ) %>%
+  # Remove threshold parameters (cutpoints) from the ordinal model
+  dplyr::filter(!grepl("\\|", term)) %>%
+  # Reorder columns for cleaner output
+  dplyr::select(term, OR, OR_low95, OR_high95, estimate, std.error, z, p_value)
+
+
+
+
+#*******************
+##### 3.6. Settings for individual models (unadjusted and adjusted) ##### 
+#*******************
+
+# Main predictors to loop over:
+# Use preds_final (already filtered to variables with variation),
+# but remove adjustment variables so we don't use them as "exposure".
+adjust_vars <- c("demo_age", "demo_sex", "education_year")  # <<< MODIFY THIS VECTOR ONLY TO CHANGE ADJUSTERS
+
+# Ordinal predictors with more than 2 levels
+ordinal_trend_vars <- c(
+  "msoc_contact",
+  "msoc_fin",
+  "msoc_fin_rec",
+  "visual_livingston",
+  "categoria_econosocial"
+)
+
+main_predictors <- setdiff(preds_final, adjust_vars)
+
+# (Optional) check which predictors will be modeled
+main_predictors
+
+
+
+#*******************
+###### 3.6.1. Helper function to fit a single ordinal logistic model ###### 
+#*******************
+
+fit_single_polr <- function(
+  exposure,
+  adjust = NULL,
+  data,
+  outcome = "tipo_grupo_ord",
+  ordinal_trend_vars = NULL
+) {
+  # Work on a copy so we can add numeric versions if needed
+  data_model <- data
+  
+  # Right-hand side terms of the formula
+  rhs_terms <- c(exposure, adjust)
+  
+  # If exposure is an ordinal predictor with >2 levels that we
+  # want to model as a linear trend, create a numeric score
+  # (1, 2, 3, ...) using the factor order.
+  if (!is.null(ordinal_trend_vars) && exposure %in% ordinal_trend_vars) {
+    trend_name <- paste0(exposure, "_trend")
+    
+    # as.numeric(ordered_factor) returns 1,2,3,.. following level order
+    data_model[[trend_name]] <- as.numeric(data_model[[exposure]])
+    
+    # Replace exposure name by the numeric version in the formula
+    rhs_terms[rhs_terms == exposure] <- trend_name
+  } else {
+    trend_name <- NULL
+  }
+  
+  # Build formula: outcome ~ exposure (+ adjusters)
+  form_str  <- paste(outcome, "~", paste(rhs_terms, collapse = " + "))
+  form_full <- as.formula(form_str)
+  
+  # Fit ordinal logistic regression
+  model <- polr(
+    formula   = form_full,
+    data      = data_model,
+    method    = "logistic",
+    Hess      = TRUE,
+    na.action = na.omit
+  )
+  
+  # Extract coefficients
+  coefs <- coef(summary(model))
+  
+  res <- data.frame(
+    term      = rownames(coefs),
+    estimate  = coefs[, "Value"],
+    std.error = coefs[, "Std. Error"],
+    z         = coefs[, "t value"],
+    row.names = NULL
+  ) %>%
+    mutate(
+      p_value   = 2 * pnorm(abs(z), lower.tail = FALSE),
+      OR        = exp(estimate),
+      OR_low95  = exp(estimate - 1.96 * std.error),
+      OR_high95 = exp(estimate + 1.96 * std.error),
+      exposure  = exposure,
+      adjustment = ifelse(
+        is.null(adjust) || length(adjust) == 0,
+        "none",
+        paste(adjust, collapse = " + ")
+      )
+    ) %>%
+    # Remove ordinal cutpoints (thresholds) from polr
+    filter(!grepl("\\|", term))
+  
+  # Keep only the row corresponding to the exposure term
+  if (!is.null(trend_name)) {
+    # For ordinal trend variables, the term is trend_name
+    res <- res %>%
+      filter(term == trend_name) %>%
+      # Rename term back to the original variable name
+      mutate(term = exposure)
+  } else {
+    # For all other variables, keep terms that start with exposure
+    res <- res %>%
+      filter(grepl(paste0("^", exposure), term))
+  }
+  
+  # Reorder columns
+  res %>%
+    dplyr::select(
+      exposure,
+      adjustment,
+      term,
+      OR,
+      OR_low95,
+      OR_high95,
+      estimate,
+      std.error,
+      z,
+      p_value
+    )
+}
+
+
+
+#*******************
+######  3.6.2. Run ALL unadjusted models (one per predictor) ######
+#*******************
+
+results <- purrr::map_dfr(
+  main_predictors,
+  ~ fit_single_polr(
+    exposure           = .x,
+    adjust             = NULL,
+    data               = df,
+    ordinal_trend_vars = ordinal_trend_vars
+  )
+)
+
+
+#*******************
+###### 3.6.3. Run ALL adjusted models (one per predictor, adjusted by chosen covariates) ######
+#*******************
+
+results_adjusted <- purrr::map_dfr(
+  main_predictors,
+  ~ fit_single_polr(
+    exposure           = .x,
+    adjust             = adjust_vars,
+    data               = df,
+    ordinal_trend_vars = ordinal_trend_vars
+  )
+)
+
+
+
+#*******************
+##### 3.7 Sex-stratified ordinal logistic models (Female / Male) #####
+#*******************
+
+#*******************
+###### 3.7.1. Define sex-specific datasets ######
+#*******************
+
+# Assuming df$demo_sex is coded as "Female" and "Male"
+df_female <- df %>% dplyr::filter(demo_sex == "Female")
+df_male   <- df %>% dplyr::filter(demo_sex == "Male")
+
+# In sex-stratified models, we do NOT adjust by demo_sex
+adjust_vars_sex <- setdiff(adjust_vars, "demo_sex")
+
+
+#*******************
+###### 3.7.2. Helper: select predictors with variation in each sex ######
+#*******************
+
+get_predictors_with_variation <- function(data, predictors) {
+  predictors[
+    vapply(
+      predictors,
+      function(v) length(unique(stats::na.omit(data[[v]]))) > 1,
+      FUN.VALUE = logical(1)
+    )
+  ]
+}
+
+main_predictors_female <- get_predictors_with_variation(df_female, main_predictors)
+main_predictors_male   <- get_predictors_with_variation(df_male,   main_predictors)
+
+# Optional: inspect how many predictors remain in each sex
+length(main_predictors_female)
+length(main_predictors_male)
+
+
+#*******************
+###### 3.7.3. Run models for FEMALE only ######
+#*******************
+
+# Unadjusted models in females: tipo_grupo_ord ~ exposure
+results_female <- purrr::map_dfr(
+  main_predictors_female,
+  ~ fit_single_polr(
+    exposure           = .x,
+    adjust             = NULL,
+    data               = df_female,
+    ordinal_trend_vars = ordinal_trend_vars
+  )
+)
+
+# Adjusted models in females: tipo_grupo_ord ~ exposure + (adjust_vars_sex)
+results_adjusted_female <- purrr::map_dfr(
+  main_predictors_female,
+  ~ fit_single_polr(
+    exposure           = .x,
+    adjust             = adjust_vars_sex,
+    data               = df_female,
+    ordinal_trend_vars = ordinal_trend_vars
+  )
+)
+
+
+#*******************
+###### 3.7.4. Run models for MALE only ######
+#*******************
+
+# Unadjusted models in males
+results_male <- purrr::map_dfr(
+  main_predictors_male,
+  ~ fit_single_polr(
+    exposure           = .x,
+    adjust             = NULL,
+    data               = df_male,
+    ordinal_trend_vars = ordinal_trend_vars
+  )
+)
+
+# Adjusted models in males
+results_adjusted_male <- purrr::map_dfr(
+  main_predictors_male,
+  ~ fit_single_polr(
+    exposure           = .x,
+    adjust             = adjust_vars_sex,
+    data               = df_male,
+    ordinal_trend_vars = ordinal_trend_vars
+  )
+)
+
+
+
+
+
+
+
+
+
+#*******************
+##### 3.8. Forest Plots #####
+#*******************
+
+#*******************
+###### 3.8.1. Add classification (from dictionary) and significance flag ######
+#*******************
+
+prepare_results_with_groups <- function(res_df, dictionary) {
+  
+  # Take classification info from dictionary
+  dict_groups <- dictionary %>%
+    dplyr::arrange(Column) %>%                               # keep original order
+    dplyr::select(Column, Clasification, Variable, Label_en) %>%       # <-- dplyr::select
+    tidyr::fill(Clasification, .direction = "down") %>%      # fill down group labels
+    dplyr::rename(
+      group_es = Clasification,
+      exposure = Variable
+    )
+  
+  res_df %>%
+    # Join by exposure name
+    dplyr::left_join(dict_groups, by = "exposure") %>%
+    # Translate Spanish group labels to English
+    dplyr::mutate(
+      group_en = dplyr::recode(
+        group_es,
+        "SOCIALES"                  = "Social variables",
+        "VARIABLES SOCIOECONOMICAS" = "Socioeconomic variables",
+        "ADVERSIDADES"              = "Adversities",
+        "VARIABLES CLÍNICAS"        = "Clinical variables",
+        "VARIABLES PSIQUIATRICAS"   = "Psychiatric variables",
+        "DEMOGRAFICAS"              = "Demographic variables",
+        "CONTROL"                   = "Control variables",
+        .default = group_es
+      ),
+      group_en = factor(
+        group_en,
+        levels = unique(group_en[order(Column)])
+      ),
+      significance = ifelse(p_value < 0.05, "p < 0.05", "Not significant"),
+      significance = factor(
+        significance,
+        levels = c("Not significant", "p < 0.05")
+      )
+    ) %>%
+    dplyr::filter(!is.na(group_en))
+}
+
+results_grouped         <- prepare_results_with_groups(results,          dictionary)
+results_adjusted_grouped <- prepare_results_with_groups(results_adjusted, dictionary)
+
+
+
+
+#*******************
+###### 3.8.2. Grouped forest plot (by variable category) ######
+#*******************
+
+make_grouped_forest <- function(
+  df,
+  label_col = "exposure",     # what to show on the y-axis (exposure vs term)
+  group_col = "group_en",     # classification column
+  title = NULL,
+  x_label = "Odds ratio (log scale)"
+) {
+  # Orden deseado de los grupos (facets), de arriba a abajo
+  group_order <- c(
+    "Control variables",
+    "Social variables",
+    "Socioeconomic variables",
+    "Adversities",
+    "Clinical variables",
+    "Psychiatric variables"
+  )
+  
+  # Orden deseado de las variables (etiquetas), de ARRIBA a ABAJO
+  label_order <- c(
+    # Control variables
+    "Years of education",
+    
+    # Social variables
+    "Social support index",
+    "Social isolation index",
+    "UCLA loneliness score",
+    "Social contact frequency",
+    
+    # Socioeconomic variables
+    "Socioeconomic category",
+    "Socioeconomic index",
+    "Socioeconomic index (0–10)",
+    "History of night-shift work",
+    "Current household finances",
+    "Household finances (12 months)",
+    "Food insecurity (unbalanced diet)",
+    "Difficulty meeting basic needs",
+    "Subjective social status ladder",
+    "Food insufficiency (eating less)",
+    "Difficulty paying medical care",
+    "Unmet medical care need",
+    
+    # Adversities
+    "Violence exposure z-score",
+    "Violence exposure index",
+    "Violence exposure (0–10)",
+    "Total violence exposure score",
+    "Physical assault with weapon",
+    "Humiliation / emotional abuse",
+    
+    # Clinical variables
+    "Alcohol use",
+    "Social isolation (yes/no)",
+    "Hypertension",
+    "Hypercholesterolemia",
+    "Depression",
+    "Smoking (yes/no)",
+    "Diabetes",
+    "Pre-frail",
+    "Total Livingston score",
+    "Hearing adequacy",
+    "Robust",
+    "Vision adequacy",
+    "Physical activity",
+    "Obesity",
+    "Education (Livingston)",
+    "Frail",
+    
+    # Psychiatric variables
+    "Depression score (GDS)",
+    "Anxiety score (GAD)"
+  )
+  
+  df_plot <- df %>%
+    dplyr::filter(
+      !is.na(OR),
+      !is.na(OR_low95),
+      !is.na(OR_high95)
+    ) %>%
+    dplyr::mutate(
+      group = .data[[group_col]],
+      label = .data[[label_col]]
+    ) %>%
+    # Aplicar orden deseado de grupos y etiquetas
+    dplyr::mutate(
+      group = factor(group, levels = group_order),
+      # usamos solo las etiquetas que realmente aparecen en df_plot
+      label = factor(
+        label,
+        levels = rev(label_order[label_order %in% label])  # rev() para que la primera quede arriba
+      )
+    ) %>%
+    dplyr::arrange(group, label) %>% 
+    dplyr::mutate(
+      or_ci_label = sprintf("%.2f [%.2f–%.2f]", OR, OR_low95, OR_high95)
+    )
+  
+  # Position of the OR [CI] text column (same for all panels)
+  max_ci    <- max(df_plot$OR_high95, na.rm = TRUE)
+  label_pos <- max_ci * 1.6  # adjust if text feels too far / too close
+  
+  df_plot <- df_plot %>%
+    dplyr::mutate(x_label_pos = label_pos)
+  
+  ggplot2::ggplot(
+    df_plot,
+    ggplot2::aes(
+      x = OR,
+      y = label
+    )
+  ) +
+    # Reference line at OR = 1
+    ggplot2::geom_vline(
+      xintercept = 1,
+      linetype   = "dashed",
+      linewidth  = 0.4,
+      colour     = "grey50"
+    ) +
+    
+    # Confidence interval lines:
+    ggplot2::geom_errorbar(
+      ggplot2::aes(
+        xmin   = OR_low95,
+        xmax   = OR_high95,
+        colour = significance
+      ),
+      width     = 0,
+      linewidth = 0.6
+    ) +
+    
+    # Point estimate
+    ggplot2::geom_point(
+      ggplot2::aes(
+        fill   = significance,
+        colour = significance
+      ),
+      shape  = 21,
+      size   = 2.6,
+      stroke = 0.6
+    ) +
+    
+    # Text column with OR [95% CI] on the right
+    ggplot2::geom_text(
+      ggplot2::aes(
+        x      = x_label_pos,
+        y      = label,
+        label  = or_ci_label,
+        colour = significance
+      ),
+      hjust = 0,
+      size  = 3,
+      show.legend = FALSE
+    ) +
+    
+    # Log scale for OR
+    ggplot2::scale_x_log10(
+      name   = x_label,
+      breaks = c(0.25, 0.5, 1, 2, 4),
+      expand = ggplot2::expansion(mult = c(0.02, 0.35))
+    ) +
+    
+    # Fill for significance:
+    ggplot2::scale_fill_manual(
+      name   = NULL,
+      values = c(
+        "Not significant" = "white",
+        "p < 0.05"        = "black"  # cambia aquí si quieres azul oscuro
+      )
+    ) +
+    
+    # Colour (borde, CI, texto OR[CI]):
+    ggplot2::scale_colour_manual(
+      values = c(
+        "Not significant" = "black",
+        "p < 0.05"        = "black"  # idem: pon tu azul aquí
+      ),
+      guide = "none"
+    ) +
+    
+    # One panel per group, stacked vertically
+    ggplot2::facet_grid(
+      rows   = ggplot2::vars(group),
+      scales = "free_y",
+      space  = "free_y",
+      switch = "y"
+    ) +
+    
+    ggplot2::labs(
+      title = title,
+      y     = NULL
+    ) +
+    
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      panel.grid.major.y = ggplot2::element_blank(),
+      panel.grid.minor   = ggplot2::element_blank(),
+      panel.grid.major.x = ggplot2::element_line(linewidth = 0.25, colour = "grey90"),
+      panel.border       = ggplot2::element_blank(),
+      axis.title.y  = ggplot2::element_blank(),
+      axis.ticks.y  = ggplot2::element_blank(),
+      axis.text.y   = ggplot2::element_text(size = 9.5),
+      axis.text.x   = ggplot2::element_text(size = 9),
+      legend.position  = "bottom",
+      legend.direction = "horizontal",
+      legend.text      = ggplot2::element_text(size = 9),
+      plot.title        = ggplot2::element_text(face = "bold", hjust = 0, size = 12),
+      strip.placement   = "outside",
+      strip.background  = ggplot2::element_rect(fill = "grey95", colour = NA),
+      strip.text.y.left = ggplot2::element_text(angle = 0, face = "bold", size = 10),
+      plot.margin = ggplot2::margin(t = 5, r = 55, b = 5, l = 5)
+    ) +
+    
+    ggplot2::coord_cartesian(clip = "off") +
+    
+    ggplot2::guides(
+      fill = ggplot2::guide_legend(
+        override.aes = list(size = 3, colour = "black", shape = 21)
+      )
+    ) +
+    ggplot2::scale_y_discrete(
+      labels = function(x) dplyr::recode(
+        x,
+        "Smoking (yes/no)"          = "Smoking",
+        "Social isolation (yes/no)" = "Social isolation",
+        .default = x
+      ))
+}
+
+
+# Eliminate the rows with certain values
+results_grouped <- results_grouped %>%
+  filter(!exposure %in% c("totalsocial_score", "categoria_econosocial",
+                          "indice_econosocial", "indice_econosocial_0_10",
+                          "fragiles", "z_violencia_score", "violencia_score_0_10_r"))
+
+# Unadjusted individual models (one model per exposure)
+p_unadjusted_grouped <- make_grouped_forest(
+  df        = results_grouped,
+  label_col = "Label_en",   # show variable name
+  title     = "Unadjusted models"
+)
+
+print(p_unadjusted_grouped)
+
+
+# Eliminate the rows with certain values
+results_adjusted_grouped <- results_adjusted_grouped %>%
+  filter(!exposure %in% c("totalsocial_score", "categoria_econosocial",
+                          "indice_econosocial", "indice_econosocial_0_10",
+                          "fragiles", "z_violencia_score", "violencia_score_0_10_r"))
+
+# Adjusted individual models (e.g., age + sex)
+p_adjusted_grouped <- make_grouped_forest(
+  df        = results_adjusted_grouped,
+  label_col = "Label_en",
+  title     = "Adjusted models"
+)
+
+print(p_adjusted_grouped)
+
+
+
+
+#*******************
+##### 3.8.3. Forest plots stratified by sex #####
+#*******************
+
+# 1) Add classification and significance to sex-specific results  
+
+results_female <- results_female %>%
+  filter(!exposure %in% c("totalsocial_score", "categoria_econosocial",
+                          "indice_econosocial", "indice_econosocial_0_10",
+                          "fragiles", "z_violencia_score", "violencia_score_0_10_r"))
+
+results_female_grouped <- prepare_results_with_groups(
+  res_df     = results_female,
+  dictionary = dictionary
+)
+
+results_adjusted_female <- results_adjusted_female %>%
+  filter(!exposure %in% c("totalsocial_score", "categoria_econosocial",
+                          "indice_econosocial", "indice_econosocial_0_10",
+                          "fragiles", "z_violencia_score", "violencia_score_0_10_r"))
+
+results_adjusted_female_grouped <- prepare_results_with_groups(
+  res_df     = results_adjusted_female,
+  dictionary = dictionary
+)
+
+results_male <- results_male %>%
+  filter(!exposure %in% c("totalsocial_score", "categoria_econosocial",
+                          "indice_econosocial", "indice_econosocial_0_10",
+                          "fragiles", "z_violencia_score", "violencia_score_0_10_r"))
+
+results_male_grouped <- prepare_results_with_groups(
+  res_df     = results_male,
+  dictionary = dictionary
+)
+
+results_adjusted_male <- results_adjusted_male %>%
+  filter(!exposure %in% c("totalsocial_score", "categoria_econosocial",
+                          "indice_econosocial", "indice_econosocial_0_10",
+                          "fragiles", "z_violencia_score", "violencia_score_0_10_r"))
+
+results_adjusted_male_grouped <- prepare_results_with_groups(
+  res_df     = results_adjusted_male,
+  dictionary = dictionary
+)
+
+
+# 2) Forest plots for FEMALE 
+
+# Unadjusted models: tipo_grupo_ord ~ exposure (Females only)
+p_unadjusted_female <- make_grouped_forest(
+  df        = results_female_grouped,
+  label_col = "Label_en",
+  title     = "Unadjusted models (Females)"
+)
+print(p_unadjusted_female)
+
+# Adjusted models: tipo_grupo_ord ~ exposure + adjust_vars_sex (Females only)
+p_adjusted_female <- make_grouped_forest(
+  df        = results_adjusted_female_grouped,
+  label_col = "Label_en",
+  title     = "Adjusted models (Females)"
+)
+print(p_adjusted_female)
+
+
+# 3) Forest plots for MALE
+
+# Unadjusted models: tipo_grupo_ord ~ exposure (Males only)
+p_unadjusted_male <- make_grouped_forest(
+  df        = results_male_grouped,
+  label_col = "Label_en",
+  title     = "Unadjusted models (Males)"
+)
+print(p_unadjusted_male)
+
+# Adjusted models: tipo_grupo_ord ~ exposure + adjust_vars_sex (Males only)
+p_adjusted_male <- make_grouped_forest(
+  df        = results_adjusted_male_grouped,
+  label_col = "Label_en",
+  title     = "Adjusted models (Males)"
+)
+print(p_adjusted_male)
+
+
+
+
+
+
+
+
+
+
+#*******************************************************************************
+#### 4. ORDINAL LOGISTIC MODELS FOR BRAIN STRUCTURE VOLUMES ####
+#*******************************************************************************
+# Outcome: tipo_grupo_ord (brain health categories: BHD, GBH, OBH)
+# Predictors: brain structure volumes (columns 50 to 168 in 'df'),
+#   plus global lesion/volume measures.
+# Each model is fitted separately (one exposure at a time), with:
+#   - Unadjusted models
+#   - Adjusted models (by adjust_vars defined above)
+#*******************************************************************************
+# Copy 'data' into 'df' so the original object remains intact
+df <- data
+
+# Ordered outcome variable: tipo_grupo_ord (from worst to best brain health)
+df$tipo_grupo_ord <- factor(
+  df$tipo_grupo,
+  levels  = c("BHD", "GBH", "OBH"),
+  ordered = TRUE
+)
+
+# Rename Lesion_Volume (ml) to a safe name, if needed
+names(df)[names(df) == "Lesion_Volume (ml)"] <- "Lesion_Volume_ml"
+
+
+#*******************
+##### 4.1. Select and scale volume predictors #####
+#*******************
+
+# Candidate volume/global predictors: columns 50 to 168
+volume_preds_all <- names(df)[50:168]
+
+# Variables that SHOULD NOT be scaled (global measures)
+no_scale_vars <- c("vic", "Lesion_Volume_ml", "Number_of_Lesions")
+
+# Check which of them actually exist in the data (for safety)
+no_scale_vars <- intersect(no_scale_vars, volume_preds_all)
+
+# Variables that WILL be scaled (regional volumes in micro-voxels)
+volume_scaled_vars <- setdiff(volume_preds_all, no_scale_vars)
+
+# Work on a copy of df so we don't alter the original data
+df_vol <- df
+
+# 4.1.1. Standardize regional volume predictors (mean 0, SD 1)
+df_vol[volume_scaled_vars] <- lapply(
+  df_vol[volume_scaled_vars],
+  function(x) as.numeric(scale(as.numeric(as.character(x))))
+)
+
+# 4.1.2. Ensure non-scaled global measures are numeric (but keep original units)
+if (length(no_scale_vars) > 0) {
+  df_vol[no_scale_vars] <- lapply(
+    df_vol[no_scale_vars],
+    function(x) as.numeric(as.character(x))
+  )
+}
+
+# 4.1.3. Keep only predictors with more than one unique (non-missing) value
+volume_preds_final <- volume_preds_all[
+  sapply(df_vol[volume_preds_all], function(x) length(unique(na.omit(x))) > 1)
+]
+
+# Optional: check which predictors are finally used
+volume_preds_final
+
+
+#*******************
+##### 4.2. Unadjusted models (volumes: scaled; global measures: original units) #####
+#*******************
+
+results_volume <- purrr::map_dfr(
+  volume_preds_final,
+  ~ fit_single_polr(
+    exposure           = .x,
+    adjust             = NULL,
+    data               = df_vol,      # df_vol has scaled regional volumes + raw global measures
+    ordinal_trend_vars = NULL
+  )
+)
+
+
+#*******************
+##### 4.3. Adjusted models (volumes: scaled; global measures: original units) #####
+#*******************
+
+results_adjusted_volume <- purrr::map_dfr(
+  volume_preds_final,
+  ~ fit_single_polr(
+    exposure           = .x,
+    adjust             = adjust_vars,
+    data               = df_vol,      # same df_vol
+    ordinal_trend_vars = NULL
+  )
+)
+
+
+
+
+#*******************
+##### 4.4. Heatmap for subcortical, cerebellar and global measures #####
+#*******************
+
+# Vector of exposures that were NOT mapped in the cortical brain plot
+# Vector of exposures that were NOT mapped in the cortical brain plot
+unmapped_exposures <- not_mapped_in_lut$exposure
+
+effects_grid_unmapped <- results_adjusted_volume %>%
+  dplyr::filter(exposure %in% unmapped_exposures) %>%
+  dplyr::mutate(
+    OR   = OR,
+    logOR = log(OR),  # 👈 nueva columna
+    hemi = dplyr::case_when(
+      grepl("_L$", exposure) ~ "Left",
+      grepl("_R$", exposure) ~ "Right",
+      TRUE                   ~ "Midline/Global"
+    ),
+    region_base = gsub("_(L|R)$", "", exposure),
+    lobe = dplyr::case_when(
+      grepl("Frontal",  region_base, ignore.case = TRUE) ~ "Frontal (basal/medial)",
+      grepl("Parietal", region_base, ignore.case = TRUE) ~ "Parietal",
+      grepl("Temporal", region_base, ignore.case = TRUE) ~ "Temporal medial",
+      grepl("Occipital",region_base, ignore.case = TRUE) ~ "Occipital",
+      grepl("Cerebelum|Vermis", region_base, ignore.case = TRUE) ~ "Cerebellum / Vermis",
+      grepl("Hippocampus|Amygdala|Caudate|Putamen|Pallidum|Thalamus",
+            region_base, ignore.case = TRUE) ~ "Subcortical nuclei",
+      grepl("vic|Lesion_Volume|Number_of_Lesions",
+            region_base, ignore.case = TRUE) ~ "Global lesion burden",
+      TRUE ~ "Other"
+    ),
+    sig_stars = dplyr::case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01  ~ "**",
+      p_value < 0.05  ~ "*",
+      TRUE            ~ ""
+    )
+  )
+
+# Optional: order lobe factor for nicer facets
+effects_grid_unmapped$lobe <- factor(
+  effects_grid_unmapped$lobe,
+  levels = c(
+    "Subcortical nuclei",
+    "Cerebellum / Vermis",
+    "Temporal medial",
+    "Frontal (basal/medial)",
+    "Global lesion burden",
+    "Parietal",
+    "Occipital",
+    "Other"
+  )
+)
+
+
+# Heatmap plot
+
+plot_volume_heatmap <- function(df, main_title, subtitle_extra = "") {
+  ggplot(
+    df,
+    aes(x = hemi, y = fct_reorder(region_base, OR))
+  ) +
+    geom_tile(aes(fill = logOR), color = "white") +
+    geom_text(
+      data = subset(df, sig_stars != ""),
+      aes(label = sig_stars),
+      color    = "black",
+      size     = 2.5,
+      fontface = "bold"
+    ) +
+    scale_fill_gradient2(
+      name     = "OR",
+      low      = "#2166ac",
+      mid      = "white",
+      high     = "#b2182b",
+      midpoint = 0,  # log(1) = 0
+      breaks   = log(c(0.8, 1, 1.2, 1.5, 2, 3.5)),
+      labels   = c("0.8", "1.0", "1.2", "1.5", "2.0", "3.5")
+    ) +
+    labs(
+      x = "Hemisphere",
+      y = "Region / measure",
+      title    = main_title
+      #,subtitle = paste0(
+      #  "Color = OR (log scale, per 1 SD or original units for globals);\n",
+      #  "*, **, *** according to p-value",
+      #  ifelse(subtitle_extra == "", "", paste0("\n", subtitle_extra)))
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(
+      panel.grid  = element_blank(),
+      strip.text  = element_text(face = "bold"),
+      axis.text.y = element_text(size = 7)
+    )
+}
+
+
+df_subcortical <- effects_grid_unmapped %>%
+  dplyr::filter(lobe == "Subcortical nuclei")
+
+plot_volume_heatmap(
+  df_subcortical,
+  main_title = "Subcortical nuclei volumes and brain health"
+)
+
+
+
+df_cerebellum <- effects_grid_unmapped %>%
+  dplyr::filter(lobe == "Cerebellum / Vermis")
+
+plot_volume_heatmap(
+  df_cerebellum,
+  main_title = "Cerebellar and vermis volumes and brain health"
+)
+
+
+
+df_global <- effects_grid_unmapped %>%
+  dplyr::filter(lobe == "Global lesion burden")
+
+plot_volume_heatmap(
+  df_global,
+  main_title = "Global lesion burden and brain health",
+  subtitle_extra = "vic, total lesion volume (ml), number of lesions"
+)
+
+
+
+df_temporal_medial <- effects_grid_unmapped %>%
+  dplyr::filter(lobe == "Temporal medial")
+
+df_frontal_basal <- effects_grid_unmapped %>%
+  dplyr::filter(lobe == "Frontal (basal/medial)")
+
+plot_volume_heatmap(
+  df_temporal_medial,
+  main_title = "Medial temporal structures and brain health"
+)
+
+plot_volume_heatmap(
+  df_frontal_basal,
+  main_title = "Basal/medial frontal structures and brain health"
+)
+
+df_other <- effects_grid_unmapped %>%
+  dplyr::filter(lobe == "Other")
+
+plot_volume_heatmap(
+  df_other,
+  main_title = "Other non-cortical regions and brain health"
+)
+
+
+
+
+
+
+#*******************
+##### 4.5. Atlas of brain regions #####
+#*******************
+
+# 1) Diccionario col_prefix -> region del atlas dk
+
+region_lut <- tribble(
+  ~col_prefix,               ~region,
+  # Precentral
+  "G_Precentral",            "precentral",
+  
+  # Frontal
+  "G_Frontal_Sup",          "superior frontal",
+  "G_Frontal_Mid",          "rostral middle frontal",   # puedes cambiar a "caudal middle frontal" si prefieres
+  "G_Supp_Motor_Area",      "superior frontal",        # SMA en frontal medial
+  
+  # Orbitofrontal
+  "G_Frontal_Sup_Orb",      "lateral orbitofrontal",
+  "G_Frontal_Mid_Orb",      "lateral orbitofrontal",
+  "G_Frontal_Inf_Orb",      "pars orbitalis",
+  "G_Frontal_Med_Orb",      "medial orbitofrontal",
+  
+  # Inferior frontal
+  "G_Frontal_Inf_Oper",     "pars opercularis",
+  "G_Frontal_Inf_Tri",      "pars triangularis",
+  
+  # Insula
+  "G_Insula",               "insula",
+  
+  # Cíngulo
+  "G_Cingulum_Ant",         "rostral anterior cingulate",
+  "G_Cingulum_Mid",         "caudal anterior cingulate",
+  "G_Cingulum_Post",        "posterior cingulate",
+  
+  # Parahipocampo
+  "G_ParaHippocampal",      "parahippocampal",
+  
+  # Occipital
+  "G_Calcarine",            "pericalcarine",
+  "G_Cuneus",               "cuneus",
+  "G_Lingual",              "lingual",
+  "G_Occipital_Sup",        "lateral occipital",
+  "G_Occipital_Mid",        "lateral occipital",
+  "G_Occipital_Inf",        "lateral occipital",
+  
+  # Fusiforme
+  "G_Fusiform",             "fusiform",
+  
+  # Parietal
+  "G_Postcentral",          "postcentral",
+  "G_Parietal_Sup",         "superior parietal",
+  "G_Parietal_Inf",         "inferior parietal",
+  "G_SupraMarginal",        "supramarginal",
+  "G_Angular",              "inferior parietal",
+  "G_Precuneus",            "precuneus",
+  "G_Paracentral_Lob",      "paracentral",
+  
+  # Temporal
+  "G_Heschl",               "transverse temporal",
+  "G_Temporal_Sup",         "superior temporal",
+  "G_Temporal_Mid",         "middle temporal",
+  "G_Temporal_Inf",         "inferior temporal",
+  "G_Temporal_Pole_Sup",    "temporal pole",
+  "G_Temporal_Pol_Mid",     "temporal pole"
+  
+  # NOTA: cosas como cerebelo, vermis, caudado, tálamo, amígdala, olfactory, rectus, etc.
+  # NO están en dk, por eso no las mappeamos aquí y quedarán fuera del plot cortical.
+)
+
+
+
+
+
+# 2) Build region-hemisphere effects table for ggseg
+
+effects_ggseg <- results_adjusted_volume %>%   # o results_volume
+  mutate(
+    logOR = log(OR),
+    sig   = p_value < 0.05,                    # significativo sí/no
+    hemi  = case_when(
+      grepl("_L$", exposure) ~ "left",
+      grepl("_R$", exposure) ~ "right",
+      TRUE ~ NA_character_
+    ),
+    col_prefix = gsub("_(L|R)$", "", exposure)
+  ) %>%
+  left_join(region_lut, by = "col_prefix") %>%
+  filter(!is.na(region), !is.na(hemi)) %>%
+  group_by(region, hemi) %>%
+  summarise(
+    logOR = mean(logOR, na.rm = TRUE),
+    sig   = any(sig, na.rm = TRUE),            # la región es sig si alguna entrada lo es
+    .groups = "drop"
+  ) %>%
+  mutate(
+    logOR_sig = ifelse(sig, logOR, NA_real_)   # solo sig tienen valor, resto NA
+  )
+
+effects_ggseg
+nrow(effects_ggseg)
+unique(effects_ggseg$region)
+
+
+
+
+# 3) Plot with ggseg: significant regions colored, non-significant in black
+
+ggseg(
+  atlas   = dk,
+  .data   = effects_ggseg,
+  mapping = aes(fill = logOR_sig),
+  colour  = "grey50",    # borde gris para todas
+  show.legend = TRUE,
+  size = 0.1
+) +
+  scale_fill_gradient2(
+    name     = "log(OR) per 1 SD",
+    low      = "#2166ac",
+    mid      = "white",
+    high     = "#b2182b",
+    midpoint = 0,
+    na.value = "grey95"  # regiones NO significativas quedan en gris clarito
+  ) +
+  labs(
+    title    = "Brain map of volume effects on brain health",
+    subtitle = "Only significant regions colored (p < 0.05)"
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    plot.title      = element_text(hjust = 0, face = "bold")
+  )
+
+
+
+
+
+
+
+# All brain volume columns from df (50:168)
+brain_cols <- names(df)[50:168]
+
+# Build helper table with hemisphere and prefix (without _L/_R)
+volumes_tbl <- tibble(
+  exposure   = brain_cols,
+  hemi       = case_when(
+    grepl("_L$", exposure) ~ "left",
+    grepl("_R$", exposure) ~ "right",
+    TRUE ~ NA_character_
+  ),
+  col_prefix = gsub("_(L|R)$", "", exposure)
+)
+
+# Join with your region_lut (col_prefix -> region in atlas)
+mapping_check <- volumes_tbl %>%
+  left_join(region_lut, by = "col_prefix")
+
+# Columns that DO have a region in region_lut
+mapped_in_lut <- mapping_check %>%
+  filter(!is.na(region))
+
+# Columns that DO NOT have a region in region_lut
+not_mapped_in_lut <- mapping_check %>%
+  filter(is.na(region))
+
+# Inspect
+print(mapped_in_lut, n = 100)
+print(not_mapped_in_lut, n=100)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#*******************
+##### 4.6. Forest for global indicators of volume dataframe #####
+#*******************
+
+globals <- c("vic", "Lesion_Volume_ml", "Number_of_Lesions")
+
+forest_global <- bind_rows(
+  # Unadjusted models
+  results_volume %>%
+    dplyr::filter(exposure %in% globals, adjustment == "none") %>%
+    dplyr::mutate(model = "Unadjusted"),
+  # Adjusted models
+  results_adjusted_volume %>%
+    dplyr::filter(exposure %in% globals, adjustment != "none") %>%
+    dplyr::mutate(model = "Adjusted")
+) %>%
+  dplyr::mutate(
+    exposure_f = factor(
+      exposure,
+      levels = globals,
+      labels = c("vic (index)", "Lesion volume (ml)", "Number of lesions")
+    ),
+    model = factor(model, levels = c("Unadjusted", "Adjusted"))
+  )
+
+
+label_df <- forest_global %>%
+  dplyr::mutate(or_ci = sprintf("%.2f [%.2f–%.2f]", OR, OR_low95, OR_high95)) %>%
+  dplyr::select(exposure_f, model, or_ci) %>%
+  tidyr::pivot_wider(names_from = model, values_from = or_ci) %>%
+  dplyr::mutate(
+    label = paste0(
+      "Unadj: ", Unadjusted, "\n",
+      "Adj:   ", Adjusted
+    )
+  )
+
+# Posición en el eje X donde irá la columna de texto
+max_ci    <- max(forest_global$OR_high95, na.rm = TRUE)
+label_pos <- max_ci * 1.6
+
+
+# misma posición para barras y puntos
+pos_dodge <- position_dodge(width = 0.4)
+
+# Función para hacer un forest plot de UNA sola variable
+make_single_forest <- function(df, var_name, var_label = var_name) {
+  
+  df_plot <- df %>%
+    dplyr::filter(exposure == var_name) %>%
+    dplyr::mutate(
+      model = factor(model, levels = c("Unadjusted", "Adjusted"))
+    )
+  
+  # Texto OR [IC95]
+  label_df <- df_plot %>%
+    dplyr::mutate(or_ci = sprintf("%.2f [%.2f–%.2f]", OR, OR_low95, OR_high95))
+  
+  # Rango del eje X (escala LINEAL)
+  max_ci <- max(df_plot$OR_high95, na.rm = TRUE)
+  min_ci <- min(df_plot$OR_low95, na.rm = TRUE)
+  
+  # Que el eje incluya el 1 siempre
+  x_min <- min(1, min_ci * 0.9)
+  x_max <- max(1, max_ci * 1.1)
+  
+  # Posición para la columna de texto
+  x_text <- max_ci * 1.05
+  x_lim_max <- max_ci * 1.35
+  
+  ggplot(df_plot, aes(x = OR, y = model)) +
+    # Línea de referencia en OR = 1
+    geom_vline(xintercept = 1, linetype = "dashed",
+               linewidth = 0.4, colour = "grey40") +
+    
+    # Barras de IC
+    geom_errorbar(
+      aes(xmin = OR_low95, xmax = OR_high95),
+      width = 0,
+      linewidth = 0.5
+    ) +
+    
+    # Puntos de OR
+    geom_point(size = 2) +
+    
+    # Columna de texto OR [IC95]
+    geom_text(
+      data = label_df,
+      # aes(x = x_text, y = model, label = or_ci),
+      inherit.aes = FALSE,
+      hjust = 0,
+      size  = 3
+    ) +
+    
+    # Encabezado de la columna de texto
+    annotate(
+      "text",
+      x = x_text,
+      y = 2.3,  # un poco por encima de la fila superior (hay 2 modelos)
+      label = "OR [95% CI]",
+      hjust = 0,
+      size  = 3.1,
+      fontface = "bold"
+    ) +
+    
+    scale_x_continuous(
+      limits = c(x_min, x_lim_max),
+      expand = expansion(mult = c(0.02, 0.02))
+    ) +
+    
+    labs(
+      x = "Odds ratio",
+      y = NULL,
+      title = var_label
+    ) +
+    
+    theme_minimal(base_size = 11) +
+    theme(
+      panel.grid.minor   = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.major.x = element_line(colour = "grey90", linewidth = 0.3),
+      axis.text.y        = element_text(face = "bold"),
+      axis.text.x        = element_text(size = 8),
+      plot.title         = element_text(face = "bold", hjust = 0),
+      legend.position    = "none",
+      plot.margin        = margin(t = 5, r = 60, b = 5, l = 5)  # margen derecho p/ texto
+    )
+}
+
+
+# Llamadas para cada variable
+
+p_vic <- make_single_forest(
+  forest_global,
+  var_name  = "vic",
+  var_label = "vic (index)"
+)
+
+p_volume <- make_single_forest(
+  forest_global,
+  var_name  = "Lesion_Volume_ml",
+  var_label = "Lesion volume (ml)"
+)
+
+p_nlesions <- make_single_forest(
+  forest_global,
+  var_name  = "Number_of_Lesions",
+  var_label = "Number of lesions"
+)
+
+# Mostrar cada uno
+p_vic
+p_volume
+p_nlesions
+
+
+
+
+
+
+
+#*******************************************************************************
+#### 5. ORDINAL LOGISTIC MODELS FOR FUNCTIONAL NETWORK STRENGTHS ####
+#*******************************************************************************
+# Outcome: tipo_grupo_ord (brain health categories: BHD, GBH, OBH)
+# Predictors: functional network measures (columns 169 to 178 in 'df')
+#   DefaultMode, Frontoparietal, DorsalAttention, VentralAttention,
+#   Limbic, Somatomotor, Visual, Subcortical, Salience, Interoception
+# Each model is fitted separately (one exposure at a time), with
+#   - Unadjusted models
+#   - Adjusted models (by adjust_vars defined above)
+#*******************************************************************************
+
+#*******************
+##### 5.1. Select network predictors (no scaling) #####
+#*******************
+
+# Candidate network predictors: columns 169 to 178
+network_preds_all <- names(df)[169:178]
+
+# Work on a copy so we don't alter df used elsewhere
+df_net <- df
+
+# Ensure network predictors are numeric (in case they came as factors/characters)
+df_net[network_preds_all] <- lapply(
+  df_net[network_preds_all],
+  function(x) as.numeric(as.character(x))
+)
+
+# Keep only predictors with more than one unique (non-missing) value
+network_preds_final <- network_preds_all[
+  sapply(df_net[network_preds_all],
+         function(x) length(unique(na.omit(x))) > 1)
+]
+
+# Optional: check
+network_preds_final
+
+
+#*******************
+##### 5.2. Unadjusted models (networks, original units)#####
+#*******************
+
+results_network <- purrr::map_dfr(
+  network_preds_final,
+  ~ fit_single_polr(
+    exposure           = .x,
+    adjust             = NULL,      # unadjusted
+    data               = df_net,    # data with original network values
+    ordinal_trend_vars = NULL       # all are continuous, no ordinal trend coding
+  )
+)
+
+
+#*******************
+##### 5.3. Adjusted models (networks, original units)
+#*******************
+
+results_adjusted_network <- purrr::map_dfr(
+  network_preds_final,
+  ~ fit_single_polr(
+    exposure           = .x,
+    adjust             = adjust_vars,  # demo_age, demo_sex, pais_residen, pais_nacim
+    data               = df_net,
+    ordinal_trend_vars = NULL
+  )
+)
+
+# results_network          -> individual unadjusted models
+# results_adjusted_network -> individual models adjusted for covariates
+
+
+
+
+#*******************
+##### 5.4. Forest Plot #####
+#*******************
+
+# Construimos tabla para el forest plot
+net_forest <- results_adjusted_network %>%
+  mutate(
+    network_label = case_when(
+      exposure == "DefaultMode"      ~ "Default mode",
+      exposure == "Frontoparietal"   ~ "Frontoparietal",
+      exposure == "DorsalAttention"  ~ "Dorsal attention",
+      exposure == "VentralAttention" ~ "Ventral attention",
+      exposure == "Salience"         ~ "Salience",
+      exposure == "Limbic"           ~ "Limbic",
+      exposure == "Somatomotor"      ~ "Somatomotor",
+      exposure == "Visual"           ~ "Visual",
+      exposure == "Subcortical"      ~ "Subcortical",
+      exposure == "Interoception"    ~ "Interoception",
+      TRUE                           ~ exposure
+    ),
+    effect_size  = abs(log(OR)),                     # magnitud del efecto
+    significance = ifelse(p_value < 0.05, "p < 0.05", "Not significant"),
+    or_ci_label  = sprintf("%.2f [%.2f–%.2f]", OR, OR_low95, OR_high95)
+  ) %>%
+  # ordenar de menor a mayor magnitud de efecto
+  mutate(
+    network = fct_reorder(network_label, effect_size)
+  )
+
+# Para OR [IC95] a la derecha
+min_ci <- min(net_forest$OR_low95, na.rm = TRUE)  # ~0.014 para Limbic
+max_ci <- max(net_forest$OR_high95, na.rm = TRUE)
+label_pos <- max_ci * 1.7
+
+ggplot(net_forest, aes(x = OR, y = network)) +
+  # línea de referencia OR = 1
+  geom_vline(xintercept = 1, linetype = "dashed",
+             linewidth = 0.4, colour = "grey50") +
+  
+  # IC 95%
+  geom_errorbar(
+    aes(xmin = OR_low95, xmax = OR_high95, colour = significance),
+    width = 0,
+    linewidth = 0.6
+  ) +
+  
+  # punto OR
+  geom_point(
+    aes(fill = significance, colour = significance),
+    shape  = 21,
+    size   = 2.8,
+    stroke = 0.6
+  ) +
+  
+  # texto OR [IC95] a la derecha
+  geom_text(
+    aes(x = label_pos, y = network, label = or_ci_label),
+    hjust = 0,
+    size  = 3,
+    colour = "black"
+  ) +
+  
+  scale_x_log10(
+    name   = "OR (log scale)",
+    breaks = c(0.05, 0.25, 1, 3, 8),
+    limits = c(min_ci * 0.8, max_ci * 2),      # ahora incluye todo el IC de Limbic
+    expand = expansion(mult = c(0.02, 0.40))
+  ) +
+  scale_fill_manual(
+    values = c("Not significant" = "white", "p < 0.05" = "black"),
+    name   = NULL
+  ) +
+  scale_colour_manual(
+    values = c("Not significant" = "black", "p < 0.05" = "black"),
+    guide  = "none"
+  ) +
+  labs(
+    y     = NULL,
+    #title = "Functional network connectivity and brain health",
+    #subtitle = "Adjusted models; points = OR, lines = 95% CI\nOrdered by |log(OR)| (effect size)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_line(colour = "grey90", linewidth = 0.3),
+    axis.text.y        = element_text(face = "bold"),
+    axis.text.x        = element_text(size = 8, angle = 45, hjust = 1),
+    plot.title         = element_text(face = "bold", hjust = 0),
+    legend.position    = "bottom",
+    plot.margin        = margin(t = 5, r = 90, b = 5, l = 5)
+  ) +
+  coord_cartesian(clip = "off")
+
+
+
+
+
+
+
+
+
+#*******************************************************************************
+#### 6. ORDINAL LOGISTIC MODELS FOR BRAIN STRUCTURES AS INDEPENDENT ####
+#*******************************************************************************
+
+#*******************
+##### 6.1. Defining independent variables #####
+#*******************
+
+# 1) Leer datos (como ya lo hacías)
+results_adjusted_volume <- read_excel(
+  "C:/Escritorio/Neurociencias/Factores asociados a Niveles de SC/Brain-Health-Thesis/Brain-Health-Thesis/data/Supplementary Material 2.xlsx",
+  sheet = "Volume_adj"
+)
+
+# 2) Filtrar solo las filas significativas (p < 0.05)
+significant_volume <- results_adjusted_volume %>%
+  filter(p_value < 0.05)
+
+# 3) Función auxiliar para agregar hemisferio y base_exposure
+add_base_exposure <- function(df) {
+  df %>%
+    mutate(
+      hemi = case_when(
+        str_ends(exposure, "_L") ~ "L",
+        str_ends(exposure, "_R") ~ "R",
+        TRUE                     ~ NA_character_
+      ),
+      base_exposure = if_else(
+        is.na(hemi),
+        exposure,                      # variables no lateralizadas
+        str_remove(exposure, "_[LR]$") # quita sufijo _L / _R
+      )
+    )
+}
+
+# 4) Añadir columnas auxiliares al dataset completo y al significativo
+vol_all <- add_base_exposure(results_adjusted_volume)
+vol_sig <- add_base_exposure(significant_volume)
+
+# 5) Estructuras base que tienen al menos un lado significativo
+bases_signif <- vol_sig %>%
+  distinct(base_exposure)
+
+# 6) Reconstruir significant_volume incluyendo hemisferios "faltantes"
+significant_volume <- vol_all %>%
+  semi_join(bases_signif, by = "base_exposure") %>%
+  dplyr::select(-hemi, -base_exposure)
+
+# Ahora este vector ya tiene los hemisferios añadidos
+unique(significant_volume$exposure)
+
+
+
+#*******************
+##### 6.2. Define variables to use #####
+#*******************
+
+# Dependent variables (socioeconomic, clinical, etc.)
+# These are exactly the ones you showed: df[4:48]
+socio_outcomes <- names(df)[4:48]
+
+## Standardize volumetric predictors (except lesions)
+# All volumetric predictors you listed
+volume_predictors <- as.character(significant_volume$exposure)
+
+# Variables that you do NOT want to scale
+no_scale <- c("Lesion_Volume_ml", "Number_of_Lesions")
+
+# Variables that WILL be scaled (all others)
+scale_vars <- setdiff(volume_predictors, no_scale)
+
+# Safety check (optional): make sure they exist in df
+scale_vars <- scale_vars[scale_vars %in% names(df)]
+
+# Z-score scaling for selected brain volumes
+df[scale_vars] <- lapply(df[scale_vars], function(x) {
+  # Ensure numeric
+  x <- as.numeric(x)
+  
+  m <- mean(x, na.rm = TRUE)
+  s <- sd(x, na.rm = TRUE)
+  
+  if (!is.finite(s) || s == 0) {
+    # No variability or invalid SD → return all NA, model will drop it
+    return(rep(NA_real_, length(x)))
+  }
+  
+  (x - m) / s   # z-score
+})
+
+# Lesion_Volume_ml and Number_of_Lesions remain unscaled in df
+# (you don't touch them here)
+
+# Adjustment variables
+adjust_vars <- c("demo_age", "demo_sex", "pais_residen", "pais_nacim")
+
+# Brain health groups (strata)
+brain_groups <- levels(df$tipo_grupo_ord)
+# brain_groups should be c("BHD", "GBH", "OBH")
+
+
+
+
+
+#*******************
+##### 6.3. Helper function to build a standardized result row #####
+#*******************
+
+build_result_row <- function(outcome,
+                             exposure,
+                             brain_group,
+                             model_type,
+                             adjustment_str,
+                             n_used,
+                             outcome_levels,
+                             reference_category,
+                             category,        # for multinomial (target category vs reference)
+                             term,
+                             estimate,
+                             std_error,
+                             statistic,
+                             p_value,
+                             conf_low,
+                             conf_high,
+                             effect,
+                             effect_low,
+                             effect_high,
+                             effect_type,     # "OR" or "beta"
+                             converged = TRUE,
+                             fit_warning = NA_character_) {
+  
+  data.frame(
+    outcome            = outcome,
+    exposure           = exposure,
+    brain_health_group = brain_group,
+    model_type         = model_type,
+    adjustment         = adjustment_str,
+    n                  = n_used,
+    outcome_levels     = outcome_levels,
+    reference_category = reference_category,
+    category           = category,
+    term               = term,
+    estimate           = estimate,
+    std.error          = std_error,
+    statistic          = statistic,
+    p_value            = p_value,
+    conf_low           = conf_low,
+    conf_high          = conf_high,
+    effect             = effect,
+    effect_low         = effect_low,
+    effect_high        = effect_high,
+    effect_type        = effect_type,
+    converged          = converged,
+    fit_warning        = fit_warning,
+    stringsAsFactors   = FALSE
+  )
+}
+
+#*******************
+##### 6.4. Core function: fit the appropriate model for one pair #####
+#####    (outcome, exposure) in one brain health group
+#*******************
+
+fit_socio_model <- function(df,
+                            outcome,
+                            exposure,
+                            adjust_vars = NULL,
+                            brain_group = NULL,
+                            min_cell_per_category = 5,   # NEW: minimum count per category
+                            max_levels_cat = 20) {       # NEW: treat up to this as "categorical-like"
+  
+  # 1. Subset by brain health group (if requested)
+  if (!is.null(brain_group)) {
+    df_sub <- df[df$tipo_grupo_ord == brain_group, , drop = FALSE]
+    brain_label <- as.character(brain_group)
+  } else {
+    df_sub <- df
+    brain_label <- "ALL"
+  }
+  
+  # 2. Keep only variables needed: outcome, exposure, adjusters
+  all_vars <- unique(c(outcome, exposure, adjust_vars))
+  all_vars <- all_vars[all_vars %in% names(df_sub)]
+  
+  if (length(all_vars) < 2) {
+    return(
+      build_result_row(
+        outcome  = outcome,
+        exposure = exposure,
+        brain_group = brain_label,
+        model_type = NA_character_,
+        adjustment_str = "none",
+        n_used = 0,
+        outcome_levels = NA_character_,
+        reference_category = NA_character_,
+        category = NA_character_,
+        term = exposure,
+        estimate = NA_real_,
+        std_error = NA_real_,
+        statistic = NA_real_,
+        p_value = NA_real_,
+        conf_low = NA_real_,
+        conf_high = NA_real_,
+        effect = NA_real_,
+        effect_low = NA_real_,
+        effect_high = NA_real_,
+        effect_type = NA_character_,
+        converged = FALSE,
+        fit_warning = "Missing variables in data frame"
+      )
+    )
+  }
+  
+  data_model <- df_sub[, all_vars, drop = FALSE]
+  
+  # Complete-case analysis
+  data_model <- stats::na.omit(data_model)
+  n_used     <- nrow(data_model)
+  
+  if (n_used < 5) {
+    return(
+      build_result_row(
+        outcome  = outcome,
+        exposure = exposure,
+        brain_group = brain_label,
+        model_type = NA_character_,
+        adjustment_str = "none",
+        n_used = n_used,
+        outcome_levels = NA_character_,
+        reference_category = NA_character_,
+        category = NA_character_,
+        term = exposure,
+        estimate = NA_real_,
+        std_error = NA_real_,
+        statistic = NA_real_,
+        p_value = NA_real_,
+        conf_low = NA_real_,
+        conf_high = NA_real_,
+        effect = NA_real_,
+        effect_low = NA_real_,
+        effect_high = NA_real_,
+        effect_type = NA_character_,
+        converged = FALSE,
+        fit_warning = "Less than 5 complete observations"
+      )
+    )
+  }
+  
+  # 3. Prepare outcome y and detect "categorical-like" variables
+  y <- data_model[[outcome]]
+  
+  # If character, make it factor
+  if (is.character(y)) {
+    y <- factor(y)
+    data_model[[outcome]] <- y
+  }
+  
+  # Outcome levels (for information)
+  if (is.factor(y) || is.ordered(y)) {
+    out_levels <- paste(levels(y), collapse = " | ")
+  } else {
+    out_levels <- NA_character_
+  }
+  
+  # Exposure must have variability
+  if (length(unique(data_model[[exposure]])) < 2) {
+    return(
+      build_result_row(
+        outcome  = outcome,
+        exposure = exposure,
+        brain_group = brain_label,
+        model_type = NA_character_,
+        adjustment_str = "none",
+        n_used = n_used,
+        outcome_levels = out_levels,
+        reference_category = NA_character_,
+        category = NA_character_,
+        term = exposure,
+        estimate = NA_real_,
+        std_error = NA_real_,
+        statistic = NA_real_,
+        p_value = NA_real_,
+        conf_low = NA_real_,
+        conf_high = NA_real_,
+        effect = NA_real_,
+        effect_low = NA_real_,
+        effect_high = NA_real_,
+        effect_type = NA_character_,
+        converged = FALSE,
+        fit_warning = "No variability in exposure"
+      )
+    )
+  }
+  
+  # Outcome must have variability
+  if (length(unique(y)) < 2) {
+    return(
+      build_result_row(
+        outcome  = outcome,
+        exposure = exposure,
+        brain_group = brain_label,
+        model_type = NA_character_,
+        adjustment_str = "none",
+        n_used = n_used,
+        outcome_levels = out_levels,
+        reference_category = NA_character_,
+        category = NA_character_,
+        term = exposure,
+        estimate = NA_real_,
+        std_error = NA_real_,
+        statistic = NA_real_,
+        p_value = NA_real_,
+        conf_low = NA_real_,
+        conf_high = NA_real_,
+        effect = NA_real_,
+        effect_low = NA_real_,
+        effect_high = NA_real_,
+        effect_type = NA_character_,
+        converged = FALSE,
+        fit_warning = "No variability in outcome"
+      )
+    )
+  }
+  
+  # NEW: detect categorical-like outcomes and check imbalance
+  # - we consider "categorical-like" if it's factor/ordered OR has few unique values.
+  is_cat_like <- (is.factor(y) || is.ordered(y) ||
+                    length(unique(na.omit(y))) <= max_levels_cat)
+  
+  if (is_cat_like) {
+    y_factor <- if (is.factor(y) || is.ordered(y)) y else factor(y)
+    tab <- table(y_factor)
+    
+    if (any(tab < min_cell_per_category)) {
+      # Too imbalanced in THIS brain group: skip model
+      return(
+        build_result_row(
+          outcome  = outcome,
+          exposure = exposure,
+          brain_group = brain_label,
+          model_type = NA_character_,
+          adjustment_str = "none",
+          n_used = n_used,
+          outcome_levels = paste(names(tab), tab, collapse = " ; "),
+          reference_category = NA_character_,
+          category = NA_character_,
+          term = exposure,
+          estimate = NA_real_,
+          std_error = NA_real_,
+          statistic = NA_real_,
+          p_value = NA_real_,
+          conf_low = NA_real_,
+          conf_high = NA_real_,
+          effect = NA_real_,
+          effect_low = NA_real_,
+          effect_high = NA_real_,
+          effect_type = NA_character_,
+          converged = FALSE,
+          fit_warning = "Outcome too imbalanced in this group (min cell < threshold)"
+        )
+      )
+    }
+  }
+  
+  # 4. Define adjustment terms (remove outcome if in adjust_vars)
+  if (!is.null(adjust_vars)) {
+    adjust_actual <- setdiff(adjust_vars, outcome)
+    adjust_actual <- adjust_actual[adjust_actual %in% names(data_model)]
+  } else {
+    adjust_actual <- character(0)
+  }
+  
+  rhs_terms <- c(exposure, adjust_actual)
+  rhs_str   <- paste(rhs_terms, collapse = " + ")
+  
+  form_str  <- paste(outcome, "~", rhs_str)
+  form_full <- as.formula(form_str)
+  
+  adjustment_str <- if (length(adjust_actual) == 0) {
+    "none"
+  } else {
+    paste(adjust_actual, collapse = " + ")
+  }
+  
+  # 5. Choose model based on outcome type
+  # 5.1 Numeric → linear regression
+  if (is.numeric(y) || is.integer(y)) {
+    
+    model_type <- "linear"
+    
+    fit <- tryCatch(
+      suppressWarnings(lm(form_full, data = data_model)),
+      error = function(e) NULL
+    )
+    
+    if (is.null(fit)) {
+      return(
+        build_result_row(
+          outcome  = outcome,
+          exposure = exposure,
+          brain_group = brain_label,
+          model_type = model_type,
+          adjustment_str = adjustment_str,
+          n_used = n_used,
+          outcome_levels = out_levels,
+          reference_category = NA_character_,
+          category = NA_character_,
+          term = exposure,
+          estimate = NA_real_,
+          std_error = NA_real_,
+          statistic = NA_real_,
+          p_value = NA_real_,
+          conf_low = NA_real_,
+          conf_high = NA_real_,
+          effect = NA_real_,
+          effect_low = NA_real_,
+          effect_high = NA_real_,
+          effect_type = "beta",
+          converged = FALSE,
+          fit_warning = "lm() failed"
+        )
+      )
+    }
+    
+    coefs <- summary(fit)$coefficients
+    
+    if (!(exposure %in% rownames(coefs))) {
+      return(
+        build_result_row(
+          outcome  = outcome,
+          exposure = exposure,
+          brain_group = brain_label,
+          model_type = model_type,
+          adjustment_str = adjustment_str,
+          n_used = n_used,
+          outcome_levels = out_levels,
+          reference_category = NA_character_,
+          category = NA_character_,
+          term = exposure,
+          estimate = NA_real_,
+          std_error = NA_real_,
+          statistic = NA_real_,
+          p_value = NA_real_,
+          conf_low = NA_real_,
+          conf_high = NA_real_,
+          effect = NA_real_,
+          effect_low = NA_real_,
+          effect_high = NA_real_,
+          effect_type = "beta",
+          converged = FALSE,
+          fit_warning = "Exposure term not found in coefficients (lm)"
+        )
+      )
+    }
+    
+    est <- coefs[exposure, "Estimate"]
+    se  <- coefs[exposure, "Std. Error"]
+    t   <- coefs[exposure, "t value"]
+    p   <- coefs[exposure, "Pr(>|t|)"]
+    
+    conf_low  <- est - 1.96 * se
+    conf_high <- est + 1.96 * se
+    
+    return(
+      build_result_row(
+        outcome  = outcome,
+        exposure = exposure,
+        brain_group = brain_label,
+        model_type = model_type,
+        adjustment_str = adjustment_str,
+        n_used = n_used,
+        outcome_levels = out_levels,
+        reference_category = NA_character_,
+        category = NA_character_,
+        term = exposure,
+        estimate = est,
+        std_error = se,
+        statistic = t,
+        p_value = p,
+        conf_low = conf_low,
+        conf_high = conf_high,
+        effect = est,
+        effect_low = conf_low,
+        effect_high = conf_high,
+        effect_type = "beta",
+        converged = TRUE
+      )
+    )
+  }
+  
+  # From here on, outcome is categorical (factor / ordered)
+  if (!(is.factor(y) || is.ordered(y))) {
+    y <- factor(y)
+    data_model[[outcome]] <- y
+  }
+  
+  n_levels <- nlevels(y)
+  levs     <- levels(y)
+  out_levels <- paste(levs, collapse = " | ")
+  ref_cat <- if (n_levels >= 2) levs[1] else NA_character_
+  
+  # 5.2 Binary outcome → logistic regression
+  if (n_levels == 2) {
+    
+    model_type <- "logistic"
+    
+    fit <- tryCatch(
+      suppressWarnings(glm(form_full, data = data_model, family = binomial)),
+      error = function(e) NULL
+    )
+    
+    if (is.null(fit)) {
+      return(
+        build_result_row(
+          outcome  = outcome,
+          exposure = exposure,
+          brain_group = brain_label,
+          model_type = model_type,
+          adjustment_str = adjustment_str,
+          n_used = n_used,
+          outcome_levels = out_levels,
+          reference_category = ref_cat,
+          category = levs[2],
+          term = exposure,
+          estimate = NA_real_,
+          std_error = NA_real_,
+          statistic = NA_real_,
+          p_value = NA_real_,
+          conf_low = NA_real_,
+          conf_high = NA_real_,
+          effect = NA_real_,
+          effect_low = NA_real_,
+          effect_high = NA_real_,
+          effect_type = "OR",
+          converged = FALSE,
+          fit_warning = "glm(binomial) failed"
+        )
+      )
+    }
+    
+    coefs <- summary(fit)$coefficients
+    
+    if (!(exposure %in% rownames(coefs))) {
+      return(
+        build_result_row(
+          outcome  = outcome,
+          exposure = exposure,
+          brain_group = brain_label,
+          model_type = model_type,
+          adjustment_str = adjustment_str,
+          n_used = n_used,
+          outcome_levels = out_levels,
+          reference_category = ref_cat,
+          category = levs[2],
+          term = exposure,
+          estimate = NA_real_,
+          std_error = NA_real_,
+          statistic = NA_real_,
+          p_value = NA_real_,
+          conf_low = NA_real_,
+          conf_high = NA_real_,
+          effect = NA_real_,
+          effect_low = NA_real_,
+          effect_high = NA_real_,
+          effect_type = "OR",
+          converged = FALSE,
+          fit_warning = "Exposure term not found in coefficients (logistic)"
+        )
+      )
+    }
+    
+    est <- coefs[exposure, "Estimate"]      # log-OR
+    se  <- coefs[exposure, "Std. Error"]
+    z   <- coefs[exposure, "z value"]
+    p   <- coefs[exposure, "Pr(>|z|)"]
+    
+    conf_low_log  <- est - 1.96 * se
+    conf_high_log <- est + 1.96 * se
+    
+    OR      <- exp(est)
+    OR_low  <- exp(conf_low_log)
+    OR_high <- exp(conf_high_log)
+    
+    return(
+      build_result_row(
+        outcome  = outcome,
+        exposure = exposure,
+        brain_group = brain_label,
+        model_type = model_type,
+        adjustment_str = adjustment_str,
+        n_used = n_used,
+        outcome_levels = out_levels,
+        reference_category = ref_cat,
+        category = levs[2],
+        term = exposure,
+        estimate = est,
+        std_error = se,
+        statistic = z,
+        p_value = p,
+        conf_low = conf_low_log,
+        conf_high = conf_high_log,
+        effect = OR,
+        effect_low = OR_low,
+        effect_high = OR_high,
+        effect_type = "OR",
+        converged = TRUE
+      )
+    )
+  }
+  
+  # 5.3 Ordered outcome with >2 levels → ordinal logistic
+  if (is.ordered(y) && n_levels > 2) {
+    
+    model_type <- "ordinal_logistic"
+    
+    fit <- tryCatch(
+      suppressWarnings(polr(form_full,
+                            data   = data_model,
+                            method = "logistic",
+                            Hess   = TRUE)),
+      error = function(e) NULL
+    )
+    
+    if (is.null(fit)) {
+      return(
+        build_result_row(
+          outcome  = outcome,
+          exposure = exposure,
+          brain_group = brain_label,
+          model_type = model_type,
+          adjustment_str = adjustment_str,
+          n_used = n_used,
+          outcome_levels = out_levels,
+          reference_category = levs[1],
+          category = NA_character_,
+          term = exposure,
+          estimate = NA_real_,
+          std_error = NA_real_,
+          statistic = NA_real_,
+          p_value = NA_real_,
+          conf_low = NA_real_,
+          conf_high = NA_real_,
+          effect = NA_real_,
+          effect_low = NA_real_,
+          effect_high = NA_real_,
+          effect_type = "OR",
+          converged = FALSE,
+          fit_warning = "polr() failed"
+        )
+      )
+    }
+    
+    coefs <- coef(summary(fit))
+    coefs <- coefs[!grepl("\\|", rownames(coefs)), , drop = FALSE]
+    
+    if (!(exposure %in% rownames(coefs))) {
+      return(
+        build_result_row(
+          outcome  = outcome,
+          exposure = exposure,
+          brain_group = brain_label,
+          model_type = model_type,
+          adjustment_str = adjustment_str,
+          n_used = n_used,
+          outcome_levels = out_levels,
+          reference_category = levs[1],
+          category = NA_character_,
+          term = exposure,
+          estimate = NA_real_,
+          std_error = NA_real_,
+          statistic = NA_real_,
+          p_value = NA_real_,
+          conf_low = NA_real_,
+          conf_high = NA_real_,
+          effect = NA_real_,
+          effect_low = NA_real_,
+          effect_high = NA_real_,
+          effect_type = "OR",
+          converged = FALSE,
+          fit_warning = "Exposure term not found in coefficients (polr)"
+        )
+      )
+    }
+    
+    est <- coefs[exposure, "Value"]
+    se  <- coefs[exposure, "Std. Error"]
+    z   <- coefs[exposure, "t value"]
+    p   <- 2 * pnorm(abs(z), lower.tail = FALSE)
+    
+    conf_low_log  <- est - 1.96 * se
+    conf_high_log <- est + 1.96 * se
+    
+    OR      <- exp(est)
+    OR_low  <- exp(conf_low_log)
+    OR_high <- exp(conf_high_log)
+    
+    return(
+      build_result_row(
+        outcome  = outcome,
+        exposure = exposure,
+        brain_group = brain_label,
+        model_type = model_type,
+        adjustment_str = adjustment_str,
+        n_used = n_used,
+        outcome_levels = out_levels,
+        reference_category = levs[1],
+        category = NA_character_,
+        term = exposure,
+        estimate = est,
+        std_error = se,
+        statistic = z,
+        p_value = p,
+        conf_low = conf_low_log,
+        conf_high = conf_high_log,
+        effect = OR,
+        effect_low = OR_low,
+        effect_high = OR_high,
+        effect_type = "OR",
+        converged = TRUE
+      )
+    )
+  }
+  
+  # 5.4 Unordered outcome with >2 levels → multinomial logistic
+  model_type <- "multinomial_logistic"
+  
+  fit <- tryCatch(
+    suppressWarnings(multinom(form_full, data = data_model, trace = FALSE)),
+    error = function(e) NULL
+  )
+  
+  if (is.null(fit)) {
+    return(
+      build_result_row(
+        outcome  = outcome,
+        exposure = exposure,
+        brain_group = brain_label,
+        model_type = model_type,
+        adjustment_str = adjustment_str,
+        n_used = n_used,
+        outcome_levels = out_levels,
+        reference_category = ref_cat,
+        category = NA_character_,
+        term = exposure,
+        estimate = NA_real_,
+        std_error = NA_real_,
+        statistic = NA_real_,
+        p_value = NA_real_,
+        conf_low = NA_real_,
+        conf_high = NA_real_,
+        effect = NA_real_,
+        effect_low = NA_real_,
+        effect_high = NA_real_,
+        effect_type = "OR",
+        converged = FALSE,
+        fit_warning = "multinom() failed"
+      )
+    )
+  }
+  
+  s  <- summary(fit)
+  B  <- s$coefficients
+  SE <- s$standard.errors
+  
+  if (is.null(dim(B))) {
+    return(
+      build_result_row(
+        outcome  = outcome,
+        exposure = exposure,
+        brain_group = brain_label,
+        model_type = model_type,
+        adjustment_str = adjustment_str,
+        n_used = n_used,
+        outcome_levels = out_levels,
+        reference_category = ref_cat,
+        category = NA_character_,
+        term = exposure,
+        estimate = NA_real_,
+        std_error = NA_real_,
+        statistic = NA_real_,
+        p_value = NA_real_,
+        conf_low = NA_real_,
+        conf_high = NA_real_,
+        effect = NA_real_,
+        effect_low = NA_real_,
+        effect_high = NA_real_,
+        effect_type = "OR",
+        converged = FALSE,
+        fit_warning = "multinom coefficients not in matrix form"
+      )
+    )
+  }
+  
+  if (!(exposure %in% colnames(B))) {
+    return(
+      build_result_row(
+        outcome  = outcome,
+        exposure = exposure,
+        brain_group = brain_label,
+        model_type = model_type,
+        adjustment_str = adjustment_str,
+        n_used = n_used,
+        outcome_levels = out_levels,
+        reference_category = ref_cat,
+        category = NA_character_,
+        term = exposure,
+        estimate = NA_real_,
+        std_error = NA_real_,
+        statistic = NA_real_,
+        p_value = NA_real_,
+        conf_low = NA_real_,
+        conf_high = NA_real_,
+        effect = NA_real_,
+        effect_low = NA_real_,
+        effect_high = NA_real_,
+        effect_type = "OR",
+        converged = FALSE,
+        fit_warning = "Exposure term not found in coefficients (multinom)"
+      )
+    )
+  }
+  
+  if (is.null(rownames(B)) || any(rownames(B) == "")) {
+    rownames(B)  <- levs[-1]
+    rownames(SE) <- levs[-1]
+  }
+  
+  col_idx <- which(colnames(B) == exposure)
+  
+  res_list <- vector("list", length = nrow(B))
+  i_row    <- 1
+  
+  for (cat in rownames(B)) {
+    est <- B[cat, col_idx]
+    se  <- SE[cat, col_idx]
+    
+    if (is.na(est) || is.na(se) || se == 0) {
+      res_list[[i_row]] <- build_result_row(
+        outcome  = outcome,
+        exposure = exposure,
+        brain_group = brain_label,
+        model_type = model_type,
+        adjustment_str = adjustment_str,
+        n_used = n_used,
+        outcome_levels = out_levels,
+        reference_category = ref_cat,
+        category = cat,
+        term = paste0(exposure, " (", cat, " vs ", ref_cat, ")"),
+        estimate = NA_real_,
+        std_error = NA_real_,
+        statistic = NA_real_,
+        p_value = NA_real_,
+        conf_low = NA_real_,
+        conf_high = NA_real_,
+        effect = NA_real_,
+        effect_low = NA_real_,
+        effect_high = NA_real_,
+        effect_type = "OR",
+        converged = FALSE,
+        fit_warning = "NA or zero SE in multinom"
+      )
+    } else {
+      z   <- est / se
+      p   <- 2 * pnorm(abs(z), lower.tail = FALSE)
+      conf_low_log  <- est - 1.96 * se
+      conf_high_log <- est + 1.96 * se
+      
+      OR      <- exp(est)
+      OR_low  <- exp(conf_low_log)
+      OR_high <- exp(conf_high_log)
+      
+      res_list[[i_row]] <- build_result_row(
+        outcome  = outcome,
+        exposure = exposure,
+        brain_group = brain_label,
+        model_type = model_type,
+        adjustment_str = adjustment_str,
+        n_used = n_used,
+        outcome_levels = out_levels,
+        reference_category = ref_cat,
+        category = cat,
+        term = paste0(exposure, " (", cat, " vs ", ref_cat, ")"),
+        estimate = est,
+        std_error = se,
+        statistic = z,
+        p_value = p,
+        conf_low = conf_low_log,
+        conf_high = conf_high_log,
+        effect = OR,
+        effect_low = OR_low,
+        effect_high = OR_high,
+        effect_type = "OR",
+        converged = TRUE
+      )
+    }
+    
+    i_row <- i_row + 1
+  }
+  
+  do.call(rbind, res_list)
+}
+
+
+#*******************
+##### 6.5. Run ALL MODELS (unadjusted and adjusted) #####
+#####    by brain health group
+#*******************
+
+# Containers for all results
+results_unadjusted_list <- list()
+results_adjusted_list   <- list()
+
+idx_unadj <- 1
+idx_adj   <- 1
+
+for (g in brain_groups) {
+  for (outcome in socio_outcomes) {
+    for (exposure in volume_predictors) {
+      
+      # 4.1. Unadjusted model
+      res_unadj <- fit_socio_model(
+        df          = df,
+        outcome     = outcome,
+        exposure    = exposure,
+        adjust_vars = NULL,           # no adjustment
+        brain_group = g
+      )
+      results_unadjusted_list[[idx_unadj]] <- res_unadj
+      idx_unadj <- idx_unadj + 1
+      
+      # 4.2. Adjusted model
+      res_adj <- fit_socio_model(
+        df          = df,
+        outcome     = outcome,
+        exposure    = exposure,
+        adjust_vars = adjust_vars,    # adjust by age, sex, country
+        brain_group = g
+      )
+      results_adjusted_list[[idx_adj]] <- res_adj
+      idx_adj <- idx_adj + 1
+    }
+  }
+}
+
+# Bind all rows into data frames
+results_socio_network <- do.call(rbind, results_unadjusted_list)
+results_socio_network_adjusted <- do.call(rbind, results_adjusted_list)
+
+## Optional: inspect the structure of the results
+
+str(results_socio_network)
+head(results_socio_network)
+
+str(results_socio_network_adjusted)
+head(results_socio_network_adjusted)
+
+
+# Eliminate rows with a certain value in a specific column
+# For example, to eliminate rows where the 'fit_warning' column has the value 'NA
+# in the results_socio_network_adjusted data frame:
+results_socio_network_adjusted <- results_socio_network_adjusted %>%
+  filter(!outcome %in% c("pais_nacim", "pais_residen", "demo_sex", "demo_age",
+                         "msoc_care", "msoc_91rev", "categoria_econosocial", "depression_livingston",
+                         "fragiles", "audit_livingston", "education_livingston", "diabetes_livingston"))
+
+results_socio_network_adjusted.significant = 
+  results_socio_network_adjusted[results_socio_network_adjusted$p_value < 0.05, ]
+
+# eliminate rows results_socio_network_adjusted$converged = FALSE
+results_socio_network_adjusted.significant = 
+  results_socio_network_adjusted.significant %>%
+  filter(converged == TRUE)
+
+
+
+
+#*******************
+##### 6.6. Visualization #####
+#*******************
+
+
+# Función auxiliar para añadir prefijo y hemisferio
+add_prefix <- function(df) {
+  df %>%
+    mutate(
+      hemi = case_when(
+        str_ends(exposure, "_L") ~ "L",
+        str_ends(exposure, "_R") ~ "R",
+        TRUE                     ~ NA_character_
+      ),
+      base_exposure = if_else(
+        is.na(hemi),
+        exposure,                 # para variables no lateralizadas
+        str_remove(exposure, "_[LR]$")  # quita el sufijo _L o _R
+      )
+    )
+}
+
+# Añadir prefijo/hemisferio a ambos dataframes
+sig_pref  <- add_prefix(results_socio_network_adjusted.significant)
+all_pref  <- add_prefix(results_socio_network_adjusted)
+
+# Combinaciones "significativas" a nivel de outcome + estructura base
+combinaciones_base <- sig_pref %>%
+  distinct(outcome, base_exposure)
+
+# Mantener todas las filas (L y/o R) en el dataframe completo
+# cuyo outcome + base_exposure esté en las combinaciones significativas
+results_socio_network_adjusted.plotting <- all_pref %>%
+  semi_join(combinaciones_base, by = c("outcome", "base_exposure")) %>%
+  dplyr::select(-hemi, -base_exposure)
+
+
+
+
+
+# Group the exposures
+# Hemispheric lookup: code -> label
+hemi_lut <- tibble(
+  hemi_code  = c("L",  "R"),
+  hemi_label = c("left", "right")
+)
+
+
+results_socio_network_adjusted.plotting <- results_socio_network_adjusted.plotting %>%
+  # 1. Extract hemisphere code and base prefix
+  mutate(
+    # Hemisphere code: L / R / NA
+    hemi_code = case_when(
+      str_ends(exposure, "_L") ~ "L",
+      str_ends(exposure, "_R") ~ "R",
+      TRUE                     ~ NA_character_
+    ),
+    # Base prefix without the side (e.g., "G_Parietal_Inf")
+    col_prefix = if_else(
+      is.na(hemi_code),
+      exposure,                          # for non-lateralized variables
+      str_remove(exposure, "_[LR]$")     # remove trailing _L or _R
+    )
+  ) %>%
+  # 2. Create structure_name (no hemisphere) and hemisphere ("left"/"right")
+  mutate(
+    # Readable anatomical name (structure only)
+    structure_name = case_when(
+      # Global / non-lateralized
+      col_prefix == "Number_of_Lesions"   ~ "Number of lesions",
+      
+      # Medial temporal / limbic
+      col_prefix == "G_Hippocampus"       ~ "Hippocampus",
+      col_prefix == "G_ParaHippocampal"   ~ "Parahippocampal",
+      col_prefix == "G_Amygdala"          ~ "Amygdala",
+      
+      # Frontal
+      col_prefix == "G_Frontal_Sup"       ~ "Superior frontal",
+      col_prefix == "G_Frontal_Mid"       ~ "Rostral middle frontal",
+      col_prefix == "G_Frontal_Sup_Med"   ~ "Medial superior frontal",
+      col_prefix == "G_Frontal_Mid_Orb"   ~ "Lateral orbitofrontal",
+      col_prefix == "G_Frontal_Med_Orb"   ~ "Medial orbitofrontal",
+      col_prefix == "G_Frontal_Inf_Tri"   ~ "Pars triangularis",
+      col_prefix == "G_Rectus"            ~ "Gyrus rectus",
+      
+      # Cingulate
+      col_prefix == "G_Cingulum_Ant"      ~ "Rostral anterior cingulate",
+      col_prefix == "G_Cingulum_Mid"      ~ "Caudal anterior cingulate",
+      
+      # Insula
+      col_prefix == "G_Insula"            ~ "Insula",
+      
+      # Parietal / precuneus / angular
+      col_prefix == "G_Parietal_Sup"      ~ "Superior parietal",
+      col_prefix == "G_Parietal_Inf"      ~ "Inferior parietal",
+      col_prefix == "G_Angular"           ~ "Inferior parietal",
+      col_prefix == "G_Precuneus"         ~ "Precuneus",
+      
+      # Temporal
+      col_prefix == "G_Temporal_Sup"      ~ "Superior temporal",
+      col_prefix == "G_Temporal_Mid"      ~ "Middle temporal",
+      col_prefix == "G_Temporal_Inf"      ~ "Inferior temporal",
+      col_prefix == "G_Temporal_Pole_Sup" ~ "Temporal pole",
+      col_prefix == "G_Temporal_Pol_Mid"  ~ "Temporal pole",
+      
+      # Occipital / fusiform
+      col_prefix == "G_Occipital_Mid"     ~ "Lateral occipital",
+      col_prefix == "G_Occipital_Inf"     ~ "Lateral occipital",
+      col_prefix == "G_Fusiform"          ~ "Fusiform",
+      
+      # Olfactory
+      col_prefix == "G_Olfactory"         ~ "Olfactory cortex",
+      
+      # Subcortical
+      col_prefix == "G_Caudate"           ~ "Caudate nucleus",
+      
+      # Fallback: if something new appears, keep the raw code
+      TRUE                                ~ col_prefix
+    ),
+    
+    # Hemisphere as a clean label
+    hemisphere = case_when(
+      hemi_code == "L" ~ "left",
+      hemi_code == "R" ~ "right",
+      TRUE             ~ NA_character_    # e.g. Number_of_Lesions
+    )
+  ) %>%
+  # 3. Drop helper columns if you don't need them
+  dplyr::select(-hemi_code, -col_prefix)
+
+# Add the name of the outcomes
+results_socio_network_adjusted.plotting <- results_socio_network_adjusted.plotting %>%
+  left_join(
+    dictionary %>% dplyr::select(Variable, Label_en),
+    by = c("outcome" = "Variable")
+  ) %>%
+  dplyr::rename(outcome_name = Label_en)
+
+# 1. PREPARE DATA
+# Starting object: results_socio_network_adjusted.plotting
+# Required columns (already in your object):
+#   outcome, exposure, brain_health_group, model_type, adjustment,
+#   outcome_name, exposure_category, estimate, effect_type, effect, p_value,
+#   region, structure_name, hemisphere
+
+
+# Categorizing the exposures
+results_socio_network_adjusted.plotting <- results_socio_network_adjusted.plotting %>%
+  mutate(
+    exposure_category = case_when(
+      # 1) Medial temporal structures (hippocampus, parahippocampal, amygdala)
+      exposure %in% c(
+        "G_Hippocampus_L", "G_Hippocampus_R",
+        "G_ParaHippocampal_L", "G_ParaHippocampal_R",
+        "G_Amygdala_L", "G_Amygdala_R"
+      ) ~ "Medial temporal structures",
+      
+      # 2) Cingulate cortex (anterior and mid)
+      exposure %in% c(
+        "G_Cingulum_Ant_L", "G_Cingulum_Ant_R",
+        "G_Cingulum_Mid_L", "G_Cingulum_Mid_R"
+      ) ~ "Cingulate cortex (anterior and mid)",
+      
+      # 3) Insula + olfactory + rectus (paralimbic / ventral frontal)
+      exposure %in% c(
+        "G_Insula_L", "G_Insula_R",
+        "G_Olfactory_L", "G_Olfactory_R",
+        "G_Rectus_L", "G_Rectus_R"
+      ) ~ "Insular and olfactory–rectus cortices",
+      
+      # 4) Orbitofrontal and ventromedial prefrontal cortex
+      exposure %in% c(
+        "G_Frontal_Med_Orb_L", "G_Frontal_Med_Orb_R",
+        "G_Frontal_Sup_Med_L", "G_Frontal_Sup_Med_R",
+        "G_Frontal_Mid_Orb_L", "G_Frontal_Mid_Orb_R",
+        "G_Frontal_Sup_Orb_L", "G_Frontal_Sup_Orb_R"
+      ) ~ "Orbitofrontal and ventromedial prefrontal cortex",
+      
+      # 5) Dorsolateral prefrontal cortex (superior + middle frontal)
+      exposure %in% c(
+        "G_Frontal_Sup_L", "G_Frontal_Sup_R",
+        "G_Frontal_Mid_L", "G_Frontal_Mid_R"
+      ) ~ "Dorsolateral prefrontal cortex",
+      
+      # 6) Inferior frontal gyrus (pars triangularis)
+      exposure %in% c(
+        "G_Frontal_Inf_Tri_L", "G_Frontal_Inf_Tri_R"
+      ) ~ "Inferior frontal gyrus (pars triangularis)",
+      
+      # 7) Lateral temporal association cortex
+      #    Superior / middle / inferior temporal (lateral)
+      exposure %in% c(
+        "G_Temporal_Sup_L", "G_Temporal_Sup_R",
+        "G_Temporal_Mid_L", "G_Temporal_Mid_R",
+        "G_Temporal_Inf_L", "G_Temporal_Inf_R"
+      ) ~ "Lateral temporal association cortex",
+      
+      # 8) Temporal pole and fusiform gyrus
+      exposure %in% c(
+        "G_Temporal_Pole_Sup_L", "G_Temporal_Pole_Sup_R",
+        "G_Temporal_Pol_Mid_L", "G_Temporal_Pol_Mid_R",
+        "G_Fusiform_L", "G_Fusiform_R"
+      ) ~ "Temporal pole and fusiform gyrus",
+      
+      # 9) Parietal association cortex (inferior/superior/angular)
+      exposure %in% c(
+        "G_Parietal_Inf_L", "G_Parietal_Inf_R",
+        "G_Parietal_Sup_L", "G_Parietal_Sup_R",
+        "G_Angular_L", "G_Angular_R"
+      ) ~ "Parietal association cortex (inferior/superior/angular)",
+      
+      # 10) Precuneus
+      exposure %in% c(
+        "G_Precuneus_L", "G_Precuneus_R"
+      ) ~ "Precuneus",
+      
+      # 11) Occipital association cortex (lateral occipital)
+      exposure %in% c(
+        "G_Occipital_Mid_L", "G_Occipital_Mid_R",
+        "G_Occipital_Inf_L", "G_Occipital_Inf_R"
+      ) ~ "Occipital association cortex",
+      
+      # 12) Subcortical nuclei
+      exposure %in% c(
+        "G_Caudate_L", "G_Caudate_R"
+      ) ~ "Subcortical nuclei",
+      
+      # 13) Global lesion markers
+      exposure %in% c(
+        "Number_of_Lesions"
+      ) ~ "Global lesion markers",
+      
+      # Fallback por si aparece alguna variable nueva
+      TRUE ~ "Other/Uncategorized"
+    )
+  )
+heat_data <- results_socio_network_adjusted.plotting %>%
+  # # Keep only rows with the necessary information
+  # filter(
+  #   !is.na(brain_health_group),
+  #   !is.na(exposure_category),
+  #   !is.na(outcome_name),
+  #   !is.na(exposure),
+  #   !is.na(estimate)
+  # ) %>%
+  mutate(
+    # Ensure brain_health_group has the correct ordering on the x-axis
+    brain_health_group = factor(
+      brain_health_group,
+      levels = c("BHD", "GBH", "OBH")
+    ),
+    effect_type = as.character(effect_type)
+  ) %>%
+  # Define what a "model" is: a row in the heatmap made of three cells (BHD, GBH, OBH)
+  group_by(
+    exposure_category,
+    outcome,
+    outcome_name,
+    exposure,
+    model_type,
+    adjustment
+  ) %>%
+  mutate(
+    # model_id: same identifier for the three rows BHD/GBH/OBH of the same regression model
+    model_id = cur_group_id(),
+    
+    # "Traffic-light" ranking within each model:
+    #   Lowest  = smallest coefficient (effect)
+    #   Highest = largest coefficient
+    #   Middle  = the remaining one
+    # This ranking is always done WITHIN each model (across BHD/GBH/OBH).
+    rank_category = case_when(
+      effect == min(effect, na.rm = TRUE) ~ "Lowest",
+      effect == max(effect, na.rm = TRUE) ~ "Highest",
+      TRUE                                   ~ "Middle"
+    ),
+    
+    # Significance codes based on p-value:
+    #   p < 0.001 -> ***
+    #   p < 0.01  -> **
+    #   p < 0.05  -> *
+    #   else      -> "" (no symbol)
+    sig = case_when(
+      is.na(p_value)  ~ "",
+      p_value < 0.001 ~ "***",
+      p_value < 0.01  ~ "**",
+      p_value < 0.05  ~ "*",
+      TRUE            ~ ""
+    ),
+    
+    # Direction of the effect: determines the SHAPE.
+    #  - If effect_type == "OR": we use the 'effect' column (OR).
+    #      OR < 1  -> "Negative" (protective, circle)
+    #      OR > 1  -> "Positive" (risk, square)
+    #  - If effect_type == "beta": we use the 'estimate' column.
+    #      beta < 0 -> "Negative" (protective, circle)
+    #      beta > 0 -> "Positive" (risk, square)
+    #  - Otherwise -> "Neutral" (in case of exactly 0 or 1, or missing info)
+    direction = case_when(
+      effect_type == "OR"   & !is.na(effect)   & effect < 1   ~ "Negative",
+      effect_type == "OR"   & !is.na(effect)   & effect > 1   ~ "Positive",
+      effect_type == "beta" & !is.na(effect) & effect < 0 ~ "Negative",
+      effect_type == "beta" & !is.na(effect) & effect > 0 ~ "Positive",
+      TRUE ~ "Neutral"
+    )
+  ) %>%
+  ungroup() %>%
+  mutate(
+    rank_category = factor(
+      rank_category,
+      levels = c("Lowest", "Middle", "Highest")
+    ),
+    direction = factor(
+      direction,
+      levels = c("Negative", "Positive", "Neutral")
+    )
+  )
+
+# Assign a row index for each model (this will be the y-axis position)
+#   - We create one row index per (exposure_category, model_id)
+#   - We optionally sort models using region/structure/hemisphere/outcome/exposure
+
+rows_tbl <- heat_data %>%
+  distinct(
+    exposure_category,
+    model_id,
+    outcome_name,
+    exposure,
+    #region,
+    structure_name,
+    hemisphere
+  ) %>%
+  group_by(exposure_category) %>%
+  arrange(
+    #region,
+    structure_name,
+    hemisphere,
+    outcome_name,
+    exposure,
+    .by_group = TRUE
+  ) %>%
+  mutate(row = row_number()) %>%
+  ungroup()
+
+# Join the row index back to the full data
+heat_data <- heat_data %>%
+  left_join(
+    rows_tbl %>% dplyr::select(exposure_category, model_id, row),
+    by = c("exposure_category", "model_id")
+  )
+
+# 2. FUNCTION TO CREATE THE HEATMAP FOR A GIVEN exposure_category
+# This function creates one plot per exposure_category with:
+#   - Three columns: BHD, GBH, OBH (brain health groups)
+#   - One row per regression model (model_id)
+#   - Two additional "columns" on the right with text labels:
+#       * Outcome: outcome_name
+#       * Exposure: exposure
+#   - Shape: circle for negative (protective), square for positive
+#   - Fill: three-level traffic light based on estimate rank within each model
+#   - Significance: *, **, *** in the center of each symbol
+
+
+# HEATMAP FUNCTION (ONE exposure_category)
+
+make_brain_heatmap <- function(cat_name,
+                               hemi = c("both", "left", "right")) {
+  
+  hemi <- match.arg(hemi)
+  
+  # Filtrar por categoría de exposición
+  df_cat <- heat_data %>%
+    filter(exposure_category == cat_name)
+  
+  # Si separamos por hemisferio, quitar Number_of_Lesions y NA
+  if (hemi != "both") {
+    df_cat <- df_cat %>%
+      filter(
+        hemisphere == hemi,
+        !is.na(hemisphere),
+        exposure != "Number_of_Lesions"
+      )
+  }
+  
+  if (nrow(df_cat) == 0L) {
+    stop("No rows found for exposure_category: ", cat_name,
+         " and hemisphere: ", hemi)
+  }
+  
+  # Y-axis
+  all_rows <- sort(unique(df_cat$row))
+  
+  df_cat <- df_cat %>%
+    mutate(
+      row_f = factor(row, levels = rev(all_rows))
+    )
+  
+  # Mapear grupos de salud cerebral a posiciones numéricas
+  df_cat <- df_cat %>%
+    mutate(
+      x_num = case_when(
+        brain_health_group == "BHD" ~ 1,
+        brain_health_group == "GBH" ~ 2,
+        brain_health_group == "OBH" ~ 3,
+        TRUE                        ~ NA_real_
+      )
+    )
+  
+  # Etiquetas de Outcome y Exposure (ahora usando structure_name)
+  df_labels <- df_cat %>%
+    distinct(row, row_f, outcome_name, structure_name) %>%
+    mutate(
+      x_outcome  = 3.6,
+      x_exposure = 4.8
+    )
+  
+  # Positivos/neutrales vs negativos
+  df_pos <- df_cat %>% filter(direction != "Negative")
+  df_neg <- df_cat %>% filter(direction == "Negative")
+  
+  # Dummy para leyenda de dirección
+  dummy_dir <- data.frame(
+    x         = c(0, 0),
+    y         = c(0, 0),
+    direction = factor(c("Positive", "Negative"),
+                       levels = c("Positive", "Negative"))
+  )
+  
+  # Eje X
+  x_breaks <- c(1, 2, 3, 3.6, 4.8)
+  x_labels <- c("BHD", "GBH", "OBH", "Outcome", "Exposure")
+  
+  # Sufijo del título
+  title_suffix <- if (hemi == "both") {
+    ""
+  } else if (hemi == "left") {
+    " (left hemisphere)"
+  } else {
+    " (right hemisphere)"
+  }
+  
+  ggplot() +
+    # 1) Rejilla del heatmap
+    geom_tile(
+      data = df_cat,
+      aes(x = x_num, y = row_f),
+      color     = "white",
+      fill      = NA,
+      linewidth = 0.4
+    ) +
+    
+    # 2) Efectos positivos/neutrales: tiles coloreados
+    geom_tile(
+      data = df_pos,
+      aes(x = x_num, y = row_f, fill = rank_category),
+      color     = "white",
+      linewidth = 0.4
+    ) +
+    
+    # 3) Efectos negativos: círculos dentro de la celda
+    geom_point(
+      data  = df_neg,
+      aes(x = x_num, y = row_f, fill = rank_category),
+      shape  = 21,
+      color  = "white",
+      size   = 4
+    ) +
+    
+    # 4) Estrellas de significancia
+    geom_text(
+      data  = df_cat,
+      aes(x = x_num, y = row_f, label = sig),
+      size = 3
+    ) +
+    
+    # 5) Columnas de texto: Outcome y Exposure (con structure_name)
+    geom_text(
+      data = df_labels,
+      aes(x = x_outcome, y = row_f, label = outcome_name),
+      hjust = 0,
+      size  = 3
+    ) +
+    geom_text(
+      data = df_labels,
+      aes(x = x_exposure, y = row_f, label = structure_name),
+      hjust = 0,
+      size  = 3
+    ) +
+    
+    # 6) Puntos dummy para la leyenda de dirección
+    geom_point(
+      data  = dummy_dir,
+      aes(x = x, y = y, shape = direction),
+      alpha = 0,
+      size  = 4
+    ) +
+    
+    # 7) Eje X continuo
+    scale_x_continuous(
+      breaks = x_breaks,
+      labels = x_labels,
+      limits = c(0.5, 5.2)
+    ) +
+    
+    # 8) Colores de magnitud
+    scale_fill_manual(
+      values = c(
+        "Lowest"  = "#0671B0",
+        "Middle"  = "#92C5DE",
+        "Highest" = "#CA0020"
+      ),
+      drop = FALSE,
+      name = "Coefficient\nmagnitude\n(within model)"
+    ) +
+    
+    # Formas para la dirección
+    scale_shape_manual(
+      values = c(
+        "Positive" = 22,
+        "Negative" = 21
+      ),
+      name = "Direction\n(OR / β)"
+    ) +
+    
+    guides(
+      shape = guide_legend(
+        override.aes = list(
+          fill   = "grey70",
+          colour = "black"
+        )
+      )
+    ) +
+    
+    coord_cartesian(clip = "off") +
+    
+    theme_minimal(base_size = 11) +
+    theme(
+      panel.grid       = element_blank(),
+      axis.title.x     = element_blank(),
+      axis.title.y     = element_blank(),
+      axis.text.x      = element_text(size = 10, angle = 45, hjust = 1),
+      axis.text.y      = element_blank(),
+      axis.ticks.y     = element_blank(),
+      plot.margin      = margin(5.5, 25, 5.5, 5.5, "pt"),
+      legend.position  = "right",
+      legend.title     = element_text(size = 10),
+      legend.text      = element_text(size = 9)
+    ) +
+    
+    ggtitle(paste0(cat_name, title_suffix))
+}
+
+
+
+
+
+# HEATMAP EXCLUSIVO PARA Number_of_Lesions (SIN HEMISFERIO)
+
+make_lesion_heatmap <- function() {
+  
+  df_cat <- heat_data %>%
+    filter(exposure == "Number_of_Lesions")
+  
+  if (nrow(df_cat) == 0L) {
+    stop("No rows found for exposure == 'Number_of_Lesions'")
+  }
+  
+  # Y-axis
+  all_rows <- sort(unique(df_cat$row))
+  
+  df_cat <- df_cat %>%
+    mutate(
+      row_f = factor(row, levels = rev(all_rows)),
+      x_num = case_when(
+        brain_health_group == "BHD" ~ 1,
+        brain_health_group == "GBH" ~ 2,
+        brain_health_group == "OBH" ~ 3,
+        TRUE                        ~ NA_real_
+      )
+    )
+  
+  # Etiquetas de Outcome y Exposure (con structure_name)
+  df_labels <- df_cat %>%
+    distinct(row, row_f, outcome_name, structure_name) %>%
+    mutate(
+      x_outcome  = 3.6,
+      x_exposure = 4.8
+    )
+  
+  df_pos <- df_cat %>% filter(direction != "Negative")
+  df_neg <- df_cat %>% filter(direction == "Negative")
+  
+  dummy_dir <- data.frame(
+    x         = c(0, 0),
+    y         = c(0, 0),
+    direction = factor(c("Positive", "Negative"),
+                       levels = c("Positive", "Negative"))
+  )
+  
+  x_breaks <- c(1, 2, 3, 3.6, 4.8)
+  x_labels <- c("BHD", "GBH", "OBH", "Outcome", "Exposure")
+  
+  ggplot() +
+    geom_tile(
+      data = df_cat,
+      aes(x = x_num, y = row_f),
+      color     = "white",
+      fill      = NA,
+      linewidth = 0.4
+    ) +
+    geom_tile(
+      data = df_pos,
+      aes(x = x_num, y = row_f, fill = rank_category),
+      color     = "white",
+      linewidth = 0.4
+    ) +
+    geom_point(
+      data  = df_neg,
+      aes(x = x_num, y = row_f, fill = rank_category),
+      shape  = 21,
+      color  = "white",
+      size   = 4
+    ) +
+    geom_text(
+      data  = df_cat,
+      aes(x = x_num, y = row_f, label = sig),
+      size = 3
+    ) +
+    geom_text(
+      data = df_labels,
+      aes(x = x_outcome, y = row_f, label = outcome_name),
+      hjust = 0,
+      size  = 3
+    ) +
+    geom_text(
+      data = df_labels,
+      aes(x = x_exposure, y = row_f, label = structure_name),
+      hjust = 0,
+      size  = 3
+    ) +
+    geom_point(
+      data  = dummy_dir,
+      aes(x = x, y = y, shape = direction),
+      alpha = 0,
+      size  = 4
+    ) +
+    scale_x_continuous(
+      breaks = x_breaks,
+      labels = x_labels,
+      limits = c(0.5, 5.2)
+    ) +
+    scale_fill_manual(
+      values = c(
+        "Lowest"  = "#0671B0",
+        "Middle"  = "#92C5DE",
+        "Highest" = "#CA0020"
+      ),
+      drop = FALSE,
+      name = "Coefficient\nmagnitude\n(within model)"
+    ) +
+    scale_shape_manual(
+      values = c(
+        "Positive" = 22,
+        "Negative" = 21
+      ),
+      name = "Direction\n(OR / β)"
+    ) +
+    guides(
+      shape = guide_legend(
+        override.aes = list(
+          fill   = "grey70",
+          colour = "black"
+        )
+      )
+    ) +
+    coord_cartesian(clip = "off") +
+    theme_minimal(base_size = 11) +
+    theme(
+      panel.grid       = element_blank(),
+      axis.title.x     = element_blank(),
+      axis.title.y     = element_blank(),
+      axis.text.x      = element_text(face = "bold", size = 10),
+      axis.text.y      = element_blank(),
+      axis.ticks.y     = element_blank(),
+      plot.margin      = margin(5.5, 25, 5.5, 5.5, "pt"),
+      legend.position  = "right",
+      legend.title     = element_text(size = 10),
+      legend.text      = element_text(size = 9)
+    ) +
+    ggtitle("Number of lesions")
+}
+
+# 3. EXAMPLES OF USE
+
+# Ejemplo para una categoría concreta
+# p1_left  <- make_brain_heatmap("Medial temporal–limbic and paralimbic regions", hemi = "left")
+# p1_right <- make_brain_heatmap("Medial temporal–limbic and paralimbic regions", hemi = "right")
+# 
+# print(p1_left)
+# print(p1_right)
+
+cats <- unique(heat_data$exposure_category)
+
+for (cat in cats) {
+  cat(">>> CATEGORY:", cat, "- LEFT\n")
+  print(make_brain_heatmap(cat, hemi = "left"))
+  
+  cat(">>> CATEGORY:", cat, "- RIGHT\n")
+  print(make_brain_heatmap(cat, hemi = "right"))
+}
+
+
+make_lesion_heatmap()
+
+
+
