@@ -1,0 +1,253 @@
+# ============================================================
+# Non-neurobiological factors associated with functional
+# connectivity, stratified by brain health level
+# ============================================================
+
+# -----------------------------
+#
+# Packages
+# -----------------------------
+suppressPackageStartupMessages({
+  library(readxl)
+  library(dplyr)
+  library(broom)
+  library(purrr)
+})
+
+# -----------------------------
+# 1) File path
+# -----------------------------
+FILE_PATH <- "C:/Escritorio/Neurociencias/Factores asociados a Niveles de SC/Supplementary Material Data and functional conectivity.xlsx"
+
+data <- read_excel(FILE_PATH)
+
+# -----------------------------
+# 2) Key variables
+# -----------------------------
+# Stratification variable
+GROUP_VAR <- "tipo_grupo"   # BHD / GBH / OBH
+
+# Adjustment variables
+ADJUST_VARS <- c("pais_residen", "demo_age", "demo_sex", "education_year")
+
+# Functional connectivity networks
+NETWORKS <- c(
+  "DefaultMode", "Frontoparietal", "DorsalAttention", "VentralAttention",
+  "Limbic", "Somatomotor", "Visual", "Subcortical", "Salience", "Interoception"
+)
+
+# 🔴 EDIT THIS: non-neurobiological predictors
+NON_NEURO_VARS <- c("Lonliness",	"Frecuency contac	Social Index",	"Isolated_Index",	"work_nigth",	"Basic Needs",	"Financial Hardship",	"Financial Deficit in last year",	"Care needs",	"Medical attention", "Food Insuficence",	"No balanced diet",	"Perceived social status",	"Economic Index",	"Weapon Attac","Humillation",	"Violence Index",	"Social Score",	"education>8years",	"audit_livingston",	"visual_livingston","tec_livingston",	"actividad_fisic_livingston",	"hipertension_livingston",	"diabetes_livingston",	"obesidad_livingston",	"demo_smoke_livingston",	"aislamiento_social_livingston",	"depression_livingston",	"alcohol_livingston",	"dislipidemia_colesterol_livingston",	"livingston	Fragiles",	"prefragiles",	"Robustos",	"gad_total",	"gds_total"
+
+)
+
+# -----------------------------
+# 3) Basic preparation
+# -----------------------------
+data <- data %>%
+  mutate(
+    demo_sex = factor(demo_sex),
+    pais_residen = factor(pais_residen),
+    tipo_grupo = factor(tipo_grupo, levels = c("BHD", "GBH", "OBH"))
+  )
+
+# Standardize connectivity
+data <- data %>%
+  mutate(across(all_of(NETWORKS), ~ as.numeric(scale(.x))))
+
+# -----------------------------
+# 4) Function: fit linear models
+# -----------------------------
+bt <- function(x) {
+  ifelse(grepl("[^A-Za-z0-9_.]", x), paste0("`", x, "`"), x)
+}
+
+fit_models_by_group <- function(df, group_name) {
+  
+  df_g <- df %>%
+    filter(tipo_grupo == group_name) %>%
+    mutate(
+      demo_sex = droplevels(factor(demo_sex)),
+      pais_residen = droplevels(factor(pais_residen))
+    )
+  
+  expand.grid(
+    network = NETWORKS,
+    predictor = NON_NEURO_VARS,
+    stringsAsFactors = FALSE
+  ) %>%
+    purrr::pmap_dfr(function(network, predictor) {
+      
+      rhs_terms <- c(bt(predictor), bt(ADJUST_VARS))
+      fmla <- as.formula(paste0(bt(network), " ~ ", paste(rhs_terms, collapse = " + ")))
+      
+      model <- tryCatch(lm(fmla, data = df_g), error = function(e) NULL)
+      if (is.null(model)) return(NULL)
+      
+      broom::tidy(model) %>%
+        dplyr::filter(term == .env$predictor) %>%
+        dplyr::mutate(
+          network = .env$network,
+          predictor = .env$predictor,
+          group = group_name,
+          n = nobs(model)
+        )
+    })
+}
+
+
+# -----------------------------
+# 5) Run models for each group
+# -----------------------------
+results_all <- map_dfr(
+  levels(data$tipo_grupo),
+  ~ fit_models_by_group(data, .x)
+)
+
+# -----------------------------
+# 6) Final tidy table
+# -----------------------------
+final_results <- results_all %>%
+  transmute(
+    group,
+    network,
+    predictor,
+    n,
+    beta = estimate,
+    CI_low = estimate - 1.96 * std.error,
+    CI_high = estimate + 1.96 * std.error,
+    p_value = p.value
+  ) %>%
+  arrange(group, p_value)
+
+print(final_results)
+
+
+# -----------------------------
+# 7) Save results
+# -----------------------------
+write.csv(
+  final_results,
+  "Non_neurobiological_factors_functional_connectivity_by_group.csv",
+  row.names = FALSE
+)
+
+message("Analysis completed and results saved.")
+#FDR ajuste#
+
+final_results_fdr <- final_results %>%
+  group_by(group) %>%
+  mutate(
+    p_fdr = p.adjust(p_value, method = "BH"),
+    sig_fdr = p_fdr < 0.05
+  ) %>%
+  ungroup()
+
+final_results_fdr %>%
+  count(group, sig_fdr)
+results_fdr_sig <- final_results_fdr %>%
+  filter(sig_fdr) %>%
+  arrange(group, p_fdr)
+
+print(results_fdr_sig)
+
+#- - - - - - - - - - -#
+# ============================================================
+# Heatmap (Nature-like): beta by predictor x network, faceted by group
+# Solid points: p < 0.05 ; Open points: p >= 0.05
+# ============================================================
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(forcats)
+  library(stringr)
+})
+
+# ---- INPUT ----
+# Assumes you already have: final_results_fdr
+# columns: group, network, predictor, beta, p_value, p_fdr, sig_fdr
+
+# 1) Create plotting dataframe
+hm <- final_results_fdr %>%
+  mutate(
+    # Order groups
+    group = factor(group, levels = c("BHD", "GBH", "OBH")),
+    # Keep network order consistent (edit if you want a specific canonical order)
+    network = factor(network, levels = c(
+      "DefaultMode","Frontoparietal","DorsalAttention","VentralAttention",
+      "Limbic","Somatomotor","Visual","Subcortical","Salience","Interoception"
+    )),
+    # Optional: nicer predictor labels (remove underscores)
+    predictor_clean = predictor %>%
+      str_replace_all("_", " ") %>%
+      str_squish(),
+    predictor_clean = fct_infreq(predictor_clean),
+    
+    sig_p = ifelse(!is.na(p_value) & p_value < 0.05, "P < 0.05", "P ≥ 0.05"),
+    sig_p = factor(sig_p, levels = c("P < 0.05", "P ≥ 0.05")),
+    
+    # In case you later have FDR-significant results
+    sig_fdr = ifelse(!is.na(p_fdr) & p_fdr < 0.05, TRUE, FALSE)
+  )
+
+# 2) Nature-like theme
+theme_nature <- function(base_size = 8, base_family = "Helvetica") {
+  theme_minimal(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      panel.grid = element_blank(),
+      axis.title = element_blank(),
+      axis.text.x = element_text(size = base_size, angle = 45, hjust = 1, vjust = 1),
+      axis.text.y = element_text(size = base_size),
+      strip.text = element_text(size = base_size + 1, face = "bold"),
+      plot.title = element_text(size = base_size + 2, face = "bold", margin = margin(b = 4)),
+      plot.subtitle = element_text(size = base_size, margin = margin(b = 6)),
+      legend.position = "bottom",
+      legend.box = "vertical",
+      legend.title = element_text(size = base_size),
+      legend.text = element_text(size = base_size),
+      plot.margin = margin(6, 6, 6, 6)
+    )
+}
+
+# 3) Heatmap
+p_heat <- ggplot(hm, aes(x = network, y = predictor_clean, fill = beta)) +
+  geom_tile(color = "white", linewidth = 0.25) +
+  # Solid vs open circles for p<0.05
+  geom_point(aes(shape = sig_p), size = 1.9, stroke = 0.6, color = "black") +
+  scale_shape_manual(values = c("P < 0.05" = 16, "P ≥ 0.05" = 1)) +
+  # Diverging palette without hard-coding “Nature colors” (keeps it clean)
+  scale_fill_gradient2(
+    low = "#B2182B", mid = "white", high = "#2166AC",
+    midpoint = 0,
+    name = expression(beta~"(SD units)")
+  ) +
+  facet_wrap(~ group, nrow = 1) +
+  labs(
+    title = "Non-neurobiological factors and network functional connectivity",
+    subtitle = "Within-group linear models adjusted for country, age, sex, and education. Solid circles: P < 0.05; open circles: P ≥ 0.05."
+  ) +
+  theme_nature(base_size = 8, base_family = "Helvetica") +
+  guides(
+    shape = guide_legend(title = NULL, override.aes = list(fill = NA)),
+    fill  = guide_colorbar(title.position = "top", barwidth = unit(55, "mm"), barheight = unit(3, "mm"))
+  )
+
+print(p_heat)
+
+# 4) Export (journal-friendly)
+mm_to_in <- function(mm) mm / 25.4
+WIDTH_2COL_IN <- mm_to_in(183)  # ~2-column
+HEIGHT_IN <- 3.6                # adjust if you have many predictors
+
+# PDF (vector)
+ggsave("heatmap_connectivity_predictors_by_group_2col.pdf",
+       p_heat, width = WIDTH_2COL_IN, height = HEIGHT_IN, units = "in", device = "pdf")
+
+# TIFF 300 dpi (stable on Windows via ragg)
+if (!requireNamespace("ragg", quietly = TRUE)) install.packages("ragg")
+ggsave("heatmap_connectivity_predictors_by_group_2col.tiff",
+       p_heat, width = WIDTH_2COL_IN, height = HEIGHT_IN, units = "in",
+       device = ragg::agg_tiff, dpi = 300, compression = "lzw")
+
+message("Saved heatmap: PDF + TIFF (2-column).")
