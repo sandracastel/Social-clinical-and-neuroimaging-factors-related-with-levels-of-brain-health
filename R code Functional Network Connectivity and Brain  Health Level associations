@@ -251,3 +251,44 @@ ggsave("heatmap_connectivity_predictors_by_group_2col.tiff",
        device = ragg::agg_tiff, dpi = 300, compression = "lzw")
 
 message("Saved heatmap: PDF + TIFF (2-column).")
+
+
+###### table ######
+
+supp_table <- final_results_fdr %>%
+  mutate(
+    Group = group,
+    Network = network,
+    Predictor = predictor,
+    `Beta (standardized)` = round(beta, 3),
+    `95% CI` = paste0(
+      "[", round(CI_low, 3), ", ", round(CI_high, 3), "]"
+    ),
+    `P value` = signif(p_value, 3),
+    `FDR-adjusted P value` = signif(p_fdr, 3)
+  ) %>%
+  select(
+    Group,
+    Network,
+    Predictor,
+    n,
+    `Beta (standardized)`,
+    `95% CI`,
+    `P value`,
+    `FDR-adjusted P value`
+  ) %>%
+  arrange(Group, `P value`)
+
+write.csv(
+  supp_table,
+  "Supplementary_Table_Functional_Connectivity_NonNeurobiological_Factors.csv",
+  row.names = FALSE
+)
+if (!requireNamespace("openxlsx", quietly = TRUE)) install.packages("openxlsx")
+library(openxlsx)
+
+write.xlsx(
+  supp_table,
+  "Supplementary_Table_Functional_Connectivity_NonNeurobiological_Factors.xlsx",
+  overwrite = TRUE
+)
